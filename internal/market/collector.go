@@ -558,16 +558,31 @@ func (c *Collector) sleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// permanentStreamErr reports whether a stream-down cause is non-restartable
-// (auth/usage/policy) — reconnecting would just fail the same way.
+// permanentStreamErr reports whether a stream-down cause is non-restartable, so
+// the collector must not build a fresh stream (which would reset the inner
+// supervisor's circuit breaker and restart-loop forever). A cause is permanent
+// when:
+//   - the inner breaker already tripped (too many fast restarts), or
+//   - it is an auth/usage/policy failure (reconnecting fails identically), or
+//   - it is a protocol/schema violation or a broker rejection (the request or
+//     the binary is wrong, not the transport).
+//
+// A plain network/transport StreamDownError stays restartable.
 func permanentStreamErr(err error) bool {
 	if err == nil {
 		return false
 	}
+	var down *tinvestcli.StreamDownError
+	if errors.As(err, &down) && down.CircuitTripped {
+		return true
+	}
 	var auth *tinvestcli.AuthError
 	var usage *tinvestcli.UsageError
 	var policy *tinvestcli.PolicyError
-	return errors.As(err, &auth) || errors.As(err, &usage) || errors.As(err, &policy)
+	var proto *tinvestcli.ProtocolError
+	var rejected *tinvestcli.BrokerRejectedError
+	return errors.As(err, &auth) || errors.As(err, &usage) || errors.As(err, &policy) ||
+		errors.As(err, &proto) || errors.As(err, &rejected)
 }
 
 // intervalDuration is the wall-clock span of one bar at the given interval.

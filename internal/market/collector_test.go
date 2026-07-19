@@ -378,6 +378,46 @@ func TestStreamDownAuthIsTerminal(t *testing.T) {
 	}
 }
 
+// TestStreamDownPermanentCausesNoRestart proves the collector does not rebuild
+// the stream on a terminal cause — a tripped circuit breaker, a protocol/schema
+// violation, or a broker rejection — which would otherwise reset the inner
+// breaker and restart-loop forever.
+func TestStreamDownPermanentCausesNoRestart(t *testing.T) {
+	cases := map[string]*tinvestcli.StreamDownError{
+		"circuit tripped": {Err: &tinvestcli.NetworkError{BrokerError: tinvestcli.BrokerError{Code: "NETWORK"}}, CircuitTripped: true},
+		"protocol":        {Err: &tinvestcli.ProtocolError{Reason: "unknown stream schema_version"}},
+		"broker rejected": {Err: &tinvestcli.BrokerRejectedError{BrokerError: tinvestcli.BrokerError{Code: "BROKER_REJECTED", Message: "instrument not tradable"}}},
+	}
+	for name, down := range cases {
+		t.Run(name, func(t *testing.T) {
+			b := newFakeBroker()
+			b.addInstrument("SBER@TQBR", uidSBER, "SBER")
+			_, s := tempStore(t)
+			c, _ := market.New(deps(b, s, clock.Real()), market.Config{
+				Universe: []string{"SBER@TQBR"}, Interval: model.Interval5m, StreamRestartBackoff: time.Millisecond,
+			})
+			if err := c.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			defer c.Stop()
+			h := <-b.handles
+
+			h.feed(down)
+			h.end()
+
+			waitFor(t, "stream marked down", func() bool { return !c.Health().StreamUp })
+			select {
+			case <-b.handles:
+				t.Fatal("permanent stream-down cause must not trigger a restart")
+			case <-time.After(150 * time.Millisecond):
+			}
+			if got := c.Health().StreamRestarts; got != 0 {
+				t.Fatalf("StreamRestarts = %d, want 0 (no restart on a permanent cause)", got)
+			}
+		})
+	}
+}
+
 func TestStreamDownNetworkRestarts(t *testing.T) {
 	b := newFakeBroker()
 	b.addInstrument("SBER@TQBR", uidSBER, "SBER")
