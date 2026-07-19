@@ -8,6 +8,7 @@ robot.toml
 # local working documentation — never published
 docs/
 logs/
+tasks/
 
 # stray build artifact from `go build ./test/faketinvest` at repo root
 /faketinvest
