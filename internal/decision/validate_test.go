@@ -195,6 +195,21 @@ func TestValidateSemantics(t *testing.T) {
 			wantErr: FieldLimitPrice,
 		},
 		{
+			name: "non-positive limit price is rejected",
+			action: func() model.Decision {
+				p := model.MustDecimal("-250.10")
+				return model.Decision{
+					InstrumentUID: "SBER-UID",
+					Action:        model.ActionBuy,
+					Quantity:      10,
+					OrderType:     model.OrderLimit,
+					LimitPrice:    &p,
+					TimeInForce:   model.TIFDay,
+				}
+			}(),
+			wantErr: FieldLimitPrice,
+		},
+		{
 			name: "limit price outside sanity band",
 			action: func() model.Decision {
 				p := model.MustDecimal("500.00") // 250 last close, +100% > 10% band
@@ -247,6 +262,28 @@ func TestValidateSemantics_PriceSanityBandIsConfigurable(t *testing.T) {
 	// A tighter 5% band rejects it.
 	if errs := ValidateSemanticsWithBand(resp, req, 500); !hasField(errs, FieldLimitPrice) {
 		t.Fatalf("5%% band should have rejected an 8%% move: %+v", errs)
+	}
+}
+
+func TestValidateSemantics_NonPositiveLimitPriceRejectedWithMissingMetadata(t *testing.T) {
+	// The exact bypass: with no tick and no last close, the tick and sanity-band
+	// checks are both skipped, so nothing but the explicit positivity check
+	// stands between a negative limit price and risk treating it as usable.
+	req := semanticsRequest()
+	req.Instruments[0].MinPriceIncrement = model.Decimal{}
+	req.Instruments[0].Features.LastClose = model.Decimal{}
+	p := model.MustDecimal("-1")
+	action := model.Decision{
+		InstrumentUID: "SBER-UID",
+		Action:        model.ActionBuy,
+		Quantity:      10,
+		OrderType:     model.OrderLimit,
+		LimitPrice:    &p,
+		TimeInForce:   model.TIFDay,
+	}
+	errs := ValidateSemantics(Response{Actions: []model.Decision{action}}, req)
+	if !hasField(errs, FieldLimitPrice) {
+		t.Fatalf("a negative limit price must be rejected even with missing tick/last-close: %+v", errs)
 	}
 }
 

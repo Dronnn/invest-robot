@@ -139,11 +139,18 @@ func ValidateSemanticsWithBand(resp Response, req Request, bandBps int64) []Acti
 	return errs
 }
 
-// checkLimitPrice verifies price is aligned to instr's price tick and falls
-// within bandBps of instr's last close. A zero MinPriceIncrement or LastClose
-// (missing data) skips the corresponding check rather than reporting a false
-// positive.
+// checkLimitPrice verifies price is strictly positive, aligned to instr's
+// price tick, and within bandBps of instr's last close. A non-positive limit
+// price is always rejected — an untrusted engine could otherwise slip a zero
+// or negative limit past a missing tick/last-close, and risk would then treat
+// it as a usable price and derive a zero/negative notional. A zero
+// MinPriceIncrement or LastClose (missing data) skips only the corresponding
+// tick/band check rather than reporting a false positive.
 func checkLimitPrice(price model.Decimal, instr InstrumentContext, bandBps int64) error {
+	if price.Sign() <= 0 {
+		return fmt.Errorf("limit price must be positive, got %s", price)
+	}
+
 	if instr.MinPriceIncrement.Sign() > 0 {
 		aligned, err := price.RoundToIncrement(instr.MinPriceIncrement, model.Nearest)
 		if err != nil {
