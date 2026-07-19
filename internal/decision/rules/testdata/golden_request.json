@@ -1,0 +1,179 @@
+{
+  "as_of": "2026-07-19T10:05:00Z",
+  "mode": "paper",
+  "cycle": {
+    "id": 42,
+    "started_at": "2026-07-19T10:05:00Z",
+    "interval": "5m"
+  },
+  "portfolio": {
+    "cash": "500000",
+    "equity": "1000000",
+    "positions": [
+      {
+        "uid": "GAZP-UID",
+        "ticker": "GAZP",
+        "qty": 20,
+        "avg_price": "150",
+        "last_price": "140",
+        "unrealized_pnl": "-200"
+      }
+    ]
+  },
+  "open_intents": null,
+  "instruments": [
+    {
+      "uid": "SBER-UID",
+      "figi": "BBG000ABC1",
+      "ticker": "SBER",
+      "class_code": "TQBR",
+      "lot": 10,
+      "min_price_increment": "0.01",
+      "quote": {
+        "bid": "249.9",
+        "ask": "250.1",
+        "last": "250",
+        "ts": "2026-07-19T10:05:00Z"
+      },
+      "features": {
+        "uid": "SBER-UID",
+        "interval": "5m",
+        "as_of": "2026-07-19T10:05:00Z",
+        "last_close": "250",
+        "volume": 125000,
+        "sma": 248,
+        "ema_fast": 251,
+        "ema_slow": 245,
+        "rsi": 60,
+        "atr": 2.5,
+        "ema_trend": "bullish",
+        "rsi_zone": "neutral",
+        "params": {
+          "sma_period": 20,
+          "ema_fast_period": 20,
+          "ema_slow_period": 50,
+          "rsi_period": 14,
+          "atr_period": 14
+        }
+      },
+      "data_freshness_ns": 30000000000
+    },
+    {
+      "uid": "GAZP-UID",
+      "figi": "BBG000ABC2",
+      "ticker": "GAZP",
+      "class_code": "TQBR",
+      "lot": 10,
+      "min_price_increment": "0.01",
+      "quote": {
+        "bid": "139.9",
+        "ask": "140.1",
+        "last": "140",
+        "ts": "2026-07-19T10:05:00Z"
+      },
+      "features": {
+        "uid": "GAZP-UID",
+        "interval": "5m",
+        "as_of": "2026-07-19T10:05:00Z",
+        "last_close": "140",
+        "volume": 98000,
+        "sma": 143,
+        "ema_fast": 138,
+        "ema_slow": 142,
+        "rsi": 45,
+        "atr": 3.1,
+        "ema_trend": "bearish",
+        "rsi_zone": "neutral",
+        "params": {
+          "sma_period": 20,
+          "ema_fast_period": 20,
+          "ema_slow_period": 50,
+          "rsi_period": 14,
+          "atr_period": 14
+        }
+      },
+      "data_freshness_ns": 45000000000
+    },
+    {
+      "uid": "LKOH-UID",
+      "figi": "BBG000ABC3",
+      "ticker": "LKOH",
+      "class_code": "TQBR",
+      "lot": 1,
+      "min_price_increment": "0.5",
+      "quote": {
+        "bid": "5999",
+        "ask": "6001",
+        "last": "6000",
+        "ts": "2026-07-19T10:05:00Z"
+      },
+      "features": {
+        "uid": "LKOH-UID",
+        "interval": "5m",
+        "as_of": "2026-07-19T10:05:00Z",
+        "last_close": "6000",
+        "volume": 5000,
+        "sma": 6050,
+        "ema_fast": 5990,
+        "ema_slow": 6040,
+        "rsi": 38,
+        "atr": 55,
+        "ema_trend": "bearish",
+        "rsi_zone": "neutral",
+        "params": {
+          "sma_period": 20,
+          "ema_fast_period": 20,
+          "ema_slow_period": 50,
+          "rsi_period": 14,
+          "atr_period": 14
+        }
+      },
+      "data_freshness_ns": 20000000000
+    },
+    {
+      "uid": "ROSN-UID",
+      "figi": "BBG000ABC4",
+      "ticker": "ROSN",
+      "class_code": "TQBR",
+      "lot": 1,
+      "min_price_increment": "0.2",
+      "quote": {
+        "bid": "599",
+        "ask": "601",
+        "last": "600",
+        "ts": "2026-07-19T08:05:00Z"
+      },
+      "features": {
+        "uid": "ROSN-UID",
+        "interval": "5m",
+        "as_of": "2026-07-19T08:05:00Z",
+        "last_close": "600",
+        "volume": 4200,
+        "sma": 598,
+        "ema_fast": 601,
+        "ema_slow": 595,
+        "rsi": 62,
+        "atr": 8,
+        "ema_trend": "bullish",
+        "rsi_zone": "neutral",
+        "params": {
+          "sma_period": 20,
+          "ema_fast_period": 20,
+          "ema_slow_period": 50,
+          "rsi_period": 14,
+          "atr_period": 14
+        }
+      },
+      "data_freshness_ns": 7200000000000
+    }
+  ],
+  "limits": {
+    "max_position_notional": "2000000",
+    "max_total_exposure": "5000000",
+    "max_orders_per_cycle": 10,
+    "max_orders_per_day": 50,
+    "max_daily_loss": "20000",
+    "cash_floor": "10000"
+  },
+  "recent_outcomes": null
+}

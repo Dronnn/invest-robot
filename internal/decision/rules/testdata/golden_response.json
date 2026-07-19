@@ -1,0 +1,35 @@
+{
+  "actions": [
+    {
+      "InstrumentUID": "SBER-UID",
+      "Action": "buy",
+      "Quantity": 200,
+      "OrderType": "market",
+      "LimitPrice": null,
+      "TimeInForce": "day",
+      "Rationale": "enter: ema_fast 251.0000 \u003e ema_slow 245.0000, rsi 60.00 in (50,70); risk_per_share=5.0000, sized 200 lot(s)",
+      "Confidence": 0.66
+    },
+    {
+      "InstrumentUID": "GAZP-UID",
+      "Action": "close",
+      "Quantity": 0,
+      "OrderType": "market",
+      "LimitPrice": null,
+      "TimeInForce": "day",
+      "Rationale": "exit: ema_fast 138.0000 \u003c ema_slow 142.0000",
+      "Confidence": 0.63
+    },
+    {
+      "InstrumentUID": "LKOH-UID",
+      "Action": "hold",
+      "Quantity": 0,
+      "OrderType": "market",
+      "LimitPrice": null,
+      "TimeInForce": "day",
+      "Rationale": "hold: ema_fast 5990.0000, ema_slow 6040.0000, rsi 38.00",
+      "Confidence": 0.6719999999999999
+    }
+  ],
+  "notes": "ROSN: stale data (2h0m0s \u003e 30m0s)"
+}
