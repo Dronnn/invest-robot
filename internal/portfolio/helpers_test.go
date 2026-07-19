@@ -92,3 +92,18 @@ func seedIntent(t *testing.T, db *sqlite.DB, uid model.InstrumentUID, clientOrde
 		t.Fatalf("seed intent %s: %v", clientOrderID, err)
 	}
 }
+
+// applyFillViaExecution mirrors the real call order between
+// internal/execution and internal/portfolio: execution writes the fills row,
+// then calls FillApplier.ApplyFill for the position/cash effects, both
+// within the same transaction (ApplyFill itself never touches the fills
+// table — see FillApplication's doc comment). Portfolio's own tests recreate
+// that precondition here rather than exercising ApplyFill against a fill row
+// that wouldn't really exist yet.
+func applyFillViaExecution(t *testing.T, ctx context.Context, p *Portfolio, q sqlite.Querier, fa FillApplication) error {
+	t.Helper()
+	if err := (sqlite.FillRepo{}).Insert(ctx, q, fa.Fill); err != nil {
+		t.Fatalf("seed fill row for %s: %v", fa.Fill.IntentID, err)
+	}
+	return p.ApplyFill(ctx, q, fa)
+}

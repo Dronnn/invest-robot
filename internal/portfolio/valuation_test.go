@@ -19,7 +19,7 @@ func TestMarkToMarket_ValuesPositionsAndPersistsSnapshot(t *testing.T) {
 	if err := p.Init(ctx, db, mustDecimal(t, "10000")); err != nil {
 		t.Fatalf("init: %v", err)
 	}
-	if err := p.ApplyFill(ctx, db, FillApplication{
+	if err := applyFillViaExecution(t, ctx, p, db, FillApplication{
 		Fill:          model.Fill{IntentID: "co-1", Price: mustDecimal(t, "100"), Qty: 5, Fee: model.Decimal{}, TS: nowUTC()},
 		InstrumentUID: uid, Side: model.SideBuy, Lot: 10,
 	}); err != nil {
@@ -59,7 +59,7 @@ func TestMarkToMarket_MissingQuoteErrors(t *testing.T) {
 	seedIntent(t, db, uid, "co-1")
 	p, sim := newTestPortfolio()
 
-	if err := p.ApplyFill(ctx, db, FillApplication{
+	if err := applyFillViaExecution(t, ctx, p, db, FillApplication{
 		Fill:          model.Fill{IntentID: "co-1", Price: mustDecimal(t, "100"), Qty: 5, Fee: model.Decimal{}, TS: nowUTC()},
 		InstrumentUID: uid, Side: model.SideBuy, Lot: 1,
 	}); err != nil {

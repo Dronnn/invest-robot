@@ -70,6 +70,14 @@ func (p *Portfolio) Init(ctx context.Context, q sqlite.Querier, starting model.D
 // unify distinct named struct types) — do not add, remove, or rename fields
 // without coordinating that adapter.
 //
+// Fill.IntentID identifies the fills row this FillApplication accounts for;
+// that row is written by internal/execution (order intent/fill records are
+// execution's, per the layout both packages were briefed against — DESIGN.md
+// §6's "fills applied transactionally by portfolio" is the accounting
+// application, not the row insert) in the same transaction ApplyFill runs
+// in, before or after calling ApplyFill — ApplyFill itself never reads or
+// writes the fills table.
+//
 // Lot is the instrument's shares-per-lot at fill time (Fill.Qty is in lots,
 // matching model.Fill's documented unit); it is carried here rather than
 // looked up so ApplyFill never needs instrument metadata to price cash and
@@ -112,10 +120,11 @@ func (fa FillApplication) validate() error {
 // never opens its own (WithTx is the caller's job, per DESIGN.md §3 — "a
 // fill and its portfolio effects commit in one SQLite transaction").
 //
-// It writes the fills row (FillRepo — DESIGN.md §6 assigns the "account"
-// step to portfolio and this is that step's input record), updates the
+// It expects the fills row for fa.Fill.IntentID to already exist in the same
+// transaction (written by internal/execution — see the FillApplication doc
+// comment); ApplyFill itself never touches the fills table. It updates the
 // position (weighted-average recompute on a buy, quantity reduction plus
-// realized-PnL bookkeeping on a sell), and appends cash_ledger rows for the
+// realized-PnL bookkeeping on a sell) and appends cash_ledger rows for the
 // notional and the fee.
 //
 // A buy always writes two cash_ledger rows: reason=fill (delta =
@@ -168,9 +177,6 @@ func (p *Portfolio) ApplyFill(ctx context.Context, q sqlite.Querier, fa FillAppl
 		pos.AvgPrice = newAvg
 		pos.UpdatedAt = now
 
-		if err := (sqlite.FillRepo{}).Insert(ctx, q, fa.Fill); err != nil {
-			return fmt.Errorf("portfolio: apply fill: insert fill: %w", err)
-		}
 		if err := (sqlite.PositionRepo{}).Upsert(ctx, q, pos); err != nil {
 			return fmt.Errorf("portfolio: apply fill: upsert position: %w", err)
 		}
@@ -210,9 +216,6 @@ func (p *Portfolio) ApplyFill(ctx context.Context, q sqlite.Querier, fa FillAppl
 		}
 		pos.UpdatedAt = now
 
-		if err := (sqlite.FillRepo{}).Insert(ctx, q, fa.Fill); err != nil {
-			return fmt.Errorf("portfolio: apply fill: insert fill: %w", err)
-		}
 		if err := (sqlite.PositionRepo{}).Upsert(ctx, q, pos); err != nil {
 			return fmt.Errorf("portfolio: apply fill: upsert position: %w", err)
 		}

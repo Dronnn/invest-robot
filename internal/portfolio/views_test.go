@@ -20,7 +20,7 @@ func TestSummary_Shape(t *testing.T) {
 	if err := p.Init(ctx, db, mustDecimal(t, "10000")); err != nil {
 		t.Fatalf("init: %v", err)
 	}
-	if err := p.ApplyFill(ctx, db, FillApplication{
+	if err := applyFillViaExecution(t, ctx, p, db, FillApplication{
 		Fill:          model.Fill{IntentID: "co-1", Price: mustDecimal(t, "100"), Qty: 5, Fee: model.Decimal{}, TS: nowUTC()},
 		InstrumentUID: uid, Side: model.SideBuy, Lot: 10,
 	}); err != nil {
@@ -59,7 +59,7 @@ func TestSummary_MissingQuoteErrors(t *testing.T) {
 	seedIntent(t, db, uid, "co-1")
 	p, _ := newTestPortfolio()
 
-	if err := p.ApplyFill(ctx, db, FillApplication{
+	if err := applyFillViaExecution(t, ctx, p, db, FillApplication{
 		Fill:          model.Fill{IntentID: "co-1", Price: mustDecimal(t, "100"), Qty: 5, Fee: model.Decimal{}, TS: nowUTC()},
 		InstrumentUID: uid, Side: model.SideBuy, Lot: 1,
 	}); err != nil {
@@ -105,13 +105,13 @@ func TestDayPnL_RealizedAndUnrealizedSplit(t *testing.T) {
 
 	sim.Advance(time.Hour)
 
-	if err := p.ApplyFill(ctx, db, FillApplication{
+	if err := applyFillViaExecution(t, ctx, p, db, FillApplication{
 		Fill:          model.Fill{IntentID: "buy-1", Price: mustDecimal(t, "100"), Qty: 10, Fee: model.Decimal{}, TS: sim.Now()},
 		InstrumentUID: uid, Side: model.SideBuy, Lot: 1,
 	}); err != nil {
 		t.Fatalf("buy: %v", err)
 	}
-	if err := p.ApplyFill(ctx, db, FillApplication{
+	if err := applyFillViaExecution(t, ctx, p, db, FillApplication{
 		Fill:          model.Fill{IntentID: "sell-1", Price: mustDecimal(t, "120"), Qty: 10, Fee: model.Decimal{}, TS: sim.Now()},
 		InstrumentUID: uid, Side: model.SideSell, Lot: 1,
 	}); err != nil {
@@ -189,7 +189,7 @@ func TestEnsureSessionStartSnapshot_CannotEstablishWithOpenPositionsAndNoPriorSn
 	seedIntent(t, db, uid, "co-1")
 	p, sim := newTestPortfolio()
 
-	if err := p.ApplyFill(ctx, db, FillApplication{
+	if err := applyFillViaExecution(t, ctx, p, db, FillApplication{
 		Fill:          model.Fill{IntentID: "co-1", Price: mustDecimal(t, "100"), Qty: 5, Fee: model.Decimal{}, TS: nowUTC()},
 		InstrumentUID: uid, Side: model.SideBuy, Lot: 1,
 	}); err != nil {

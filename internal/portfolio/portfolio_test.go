@@ -35,13 +35,13 @@ func TestApplyFill_BuyWeightedAveragePrice(t *testing.T) {
 	seedIntent(t, db, uid, "co-2")
 	p, _ := newTestPortfolio()
 
-	if err := p.ApplyFill(ctx, db, FillApplication{
+	if err := applyFillViaExecution(t, ctx, p, db, FillApplication{
 		Fill:          model.Fill{IntentID: "co-1", Price: mustDecimal(t, "100"), Qty: 5, Fee: mustDecimal(t, "1.5"), TS: nowUTC()},
 		InstrumentUID: uid, Side: model.SideBuy, Lot: 10,
 	}); err != nil {
 		t.Fatalf("first buy: %v", err)
 	}
-	if err := p.ApplyFill(ctx, db, FillApplication{
+	if err := applyFillViaExecution(t, ctx, p, db, FillApplication{
 		Fill:          model.Fill{IntentID: "co-2", Price: mustDecimal(t, "110"), Qty: 5, Fee: mustDecimal(t, "2"), TS: nowUTC()},
 		InstrumentUID: uid, Side: model.SideBuy, Lot: 10,
 	}); err != nil {
@@ -67,11 +67,6 @@ func TestApplyFill_BuyWeightedAveragePrice(t *testing.T) {
 	if balance.String() != "-10503.5" {
 		t.Errorf("cash balance = %s, want -10503.5", balance)
 	}
-
-	fills, err := (sqlite.FillRepo{}).ListByIntent(ctx, db, "co-1")
-	if err != nil || len(fills) != 1 {
-		t.Fatalf("ListByIntent co-1: err=%v len=%d", err, len(fills))
-	}
 }
 
 func TestApplyFill_FeeLedgerEntriesAlwaysWritten(t *testing.T) {
@@ -81,7 +76,7 @@ func TestApplyFill_FeeLedgerEntriesAlwaysWritten(t *testing.T) {
 	seedIntent(t, db, uid, "co-1")
 	p, _ := newTestPortfolio()
 
-	if err := p.ApplyFill(ctx, db, FillApplication{
+	if err := applyFillViaExecution(t, ctx, p, db, FillApplication{
 		Fill:          model.Fill{IntentID: "co-1", Price: mustDecimal(t, "100"), Qty: 5, Fee: model.Decimal{}, TS: nowUTC()},
 		InstrumentUID: uid, Side: model.SideBuy, Lot: 1,
 	}); err != nil {
@@ -121,7 +116,7 @@ func TestApplyFill_SellPartialThenFullClose(t *testing.T) {
 	seedIntent(t, db, uid, "sell-2")
 	p, _ := newTestPortfolio()
 
-	if err := p.ApplyFill(ctx, db, FillApplication{
+	if err := applyFillViaExecution(t, ctx, p, db, FillApplication{
 		Fill:          model.Fill{IntentID: "buy-1", Price: mustDecimal(t, "100"), Qty: 10, Fee: model.Decimal{}, TS: nowUTC()},
 		InstrumentUID: uid, Side: model.SideBuy, Lot: 1,
 	}); err != nil {
@@ -129,7 +124,7 @@ func TestApplyFill_SellPartialThenFullClose(t *testing.T) {
 	}
 
 	// Partial sell: 4 of 10 lots at 120, realized pnl = (120-100)*4 = 80.
-	if err := p.ApplyFill(ctx, db, FillApplication{
+	if err := applyFillViaExecution(t, ctx, p, db, FillApplication{
 		Fill:          model.Fill{IntentID: "sell-1", Price: mustDecimal(t, "120"), Qty: 4, Fee: mustDecimal(t, "1"), TS: nowUTC()},
 		InstrumentUID: uid, Side: model.SideSell, Lot: 1,
 	}); err != nil {
@@ -159,7 +154,7 @@ func TestApplyFill_SellPartialThenFullClose(t *testing.T) {
 	}
 
 	// Full close: remaining 6 lots at 90, realized pnl = (90-100)*6 = -60.
-	if err := p.ApplyFill(ctx, db, FillApplication{
+	if err := applyFillViaExecution(t, ctx, p, db, FillApplication{
 		Fill:          model.Fill{IntentID: "sell-2", Price: mustDecimal(t, "90"), Qty: 6, Fee: mustDecimal(t, "0.5"), TS: nowUTC()},
 		InstrumentUID: uid, Side: model.SideSell, Lot: 1,
 	}); err != nil {
@@ -221,21 +216,28 @@ func TestApplyFill_OversellRejected(t *testing.T) {
 	ctx := context.Background()
 	uid := seedInstrument(t, db, "uid-3", 1).UID
 	seedIntent(t, db, uid, "buy-1")
+	seedIntent(t, db, uid, "sell-1")
 	p, _ := newTestPortfolio()
 
-	if err := p.ApplyFill(ctx, db, FillApplication{
+	if err := applyFillViaExecution(t, ctx, p, db, FillApplication{
 		Fill:          model.Fill{IntentID: "buy-1", Price: mustDecimal(t, "100"), Qty: 5, Fee: model.Decimal{}, TS: nowUTC()},
 		InstrumentUID: uid, Side: model.SideBuy, Lot: 1,
 	}); err != nil {
 		t.Fatalf("buy: %v", err)
 	}
 
-	// sell-1 is deliberately never seeded as an order_intents row: the
-	// oversell check must reject before ApplyFill attempts to write
-	// anything that would need it to exist.
-	err := p.ApplyFill(ctx, db, FillApplication{
-		Fill:          model.Fill{IntentID: "sell-1", Price: mustDecimal(t, "100"), Qty: 6, Fee: model.Decimal{}, TS: nowUTC()},
-		InstrumentUID: uid, Side: model.SideSell, Lot: 1,
+	// Mirror the real call order end to end: execution inserts the fills
+	// row and calls ApplyFill inside one transaction, so an oversell must
+	// roll both back together, not just leave ApplyFill's own writes
+	// unwritten.
+	oversellFill := model.Fill{IntentID: "sell-1", Price: mustDecimal(t, "100"), Qty: 6, Fee: model.Decimal{}, TS: nowUTC()}
+	err := sqlite.WithTx(ctx, db.DB, func(ctx context.Context, tx *sql.Tx) error {
+		if err := (sqlite.FillRepo{}).Insert(ctx, tx, oversellFill); err != nil {
+			return err
+		}
+		return p.ApplyFill(ctx, tx, FillApplication{
+			Fill: oversellFill, InstrumentUID: uid, Side: model.SideSell, Lot: 1,
+		})
 	})
 	var oversell *OversellError
 	if !errors.As(err, &oversell) {
@@ -245,14 +247,15 @@ func TestApplyFill_OversellRejected(t *testing.T) {
 		t.Errorf("oversell = %+v, want Have=5 Want=6", oversell)
 	}
 
-	// Nothing from the rejected sell should have been written.
+	// Nothing from the rejected sell should have survived, including the
+	// fills row execution would have inserted moments before.
 	pos, ok, err := (sqlite.PositionRepo{}).Get(ctx, db, uid)
 	if err != nil || !ok || pos.Qty != 5 {
 		t.Fatalf("position after rejected oversell: ok=%v err=%v qty=%d, want qty=5", ok, err, pos.Qty)
 	}
 	fills, err := (sqlite.FillRepo{}).ListByIntent(ctx, db, "sell-1")
 	if err != nil || len(fills) != 0 {
-		t.Fatalf("fills for rejected sell-1: err=%v len=%d, want 0", err, len(fills))
+		t.Fatalf("fills for rejected sell-1: err=%v len=%d, want 0 (must have rolled back)", err, len(fills))
 	}
 }
 
@@ -276,7 +279,7 @@ func TestApplyFill_ZeroPositionResetsAvgPriceForReentry(t *testing.T) {
 		{"buy-2", model.SideBuy, "80", 3},    // re-entry
 	}
 	for _, s := range steps {
-		if err := p.ApplyFill(ctx, db, FillApplication{
+		if err := applyFillViaExecution(t, ctx, p, db, FillApplication{
 			Fill:          model.Fill{IntentID: s.intent, Price: mustDecimal(t, s.price), Qty: s.qty, Fee: model.Decimal{}, TS: nowUTC()},
 			InstrumentUID: uid, Side: s.side, Lot: 1,
 		}); err != nil {
@@ -331,11 +334,16 @@ func TestApplyFill_WithTxRollbackLeavesNoPartialRows(t *testing.T) {
 	seedIntent(t, db, uid, "co-1")
 	p, _ := newTestPortfolio()
 
+	fill := model.Fill{IntentID: "co-1", Price: mustDecimal(t, "100"), Qty: 5, Fee: mustDecimal(t, "1"), TS: nowUTC()}
 	injected := fmt.Errorf("injected failure after ApplyFill")
 	err := sqlite.WithTx(ctx, db.DB, func(ctx context.Context, tx *sql.Tx) error {
+		// Mirror the real call order: execution inserts the fills row, then
+		// calls ApplyFill, both inside the same transaction.
+		if err := (sqlite.FillRepo{}).Insert(ctx, tx, fill); err != nil {
+			return err
+		}
 		if err := p.ApplyFill(ctx, tx, FillApplication{
-			Fill:          model.Fill{IntentID: "co-1", Price: mustDecimal(t, "100"), Qty: 5, Fee: mustDecimal(t, "1"), TS: nowUTC()},
-			InstrumentUID: uid, Side: model.SideBuy, Lot: 1,
+			Fill: fill, InstrumentUID: uid, Side: model.SideBuy, Lot: 1,
 		}); err != nil {
 			return err
 		}
