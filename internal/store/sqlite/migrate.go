@@ -86,22 +86,31 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     applied_at TEXT NOT NULL
 );`
 
-// migrate applies pending embedded migrations to db in version order, each
-// inside its own transaction, and verifies the checksum of every
-// already-applied migration against the embedded copy shipped in this
-// binary. It refuses to proceed if the database has any applied version this
-// binary does not know about — in particular a version newer than the
-// highest embedded migration, which means the database was written by a
-// newer build of the robot.
-func migrate(ctx context.Context, db *sql.DB) error {
-	if _, err := db.ExecContext(ctx, createSchemaMigrationsTable); err != nil {
-		return fmt.Errorf("sqlite: create schema_migrations: %w", err)
-	}
-
+// migrate loads the embedded migrations and applies any that are pending to
+// db. now supplies the applied_at timestamp; the caller injects it (Open
+// passes time.Now().UTC) so no time source is read below the orchestration
+// layer (DESIGN §3's no-time.Now rule).
+func migrate(ctx context.Context, db *sql.DB, now func() time.Time) error {
 	migs, err := loadMigrations()
 	if err != nil {
 		return err
 	}
+	return applyMigrations(ctx, db, migs, now)
+}
+
+// applyMigrations applies the given migrations to db in version order, each
+// inside its own transaction, and verifies the checksum of every
+// already-applied migration against the copy in migs. It refuses to proceed if
+// the database has any applied version not present in migs — in particular a
+// version newer than the highest given migration, which means the database was
+// written by a newer build of the robot. Taking the migration set as a
+// parameter (rather than always loading the embedded one) lets the upgrade and
+// atomic-rollback tests drive it with synthetic migrations.
+func applyMigrations(ctx context.Context, db *sql.DB, migs []migration, now func() time.Time) error {
+	if _, err := db.ExecContext(ctx, createSchemaMigrationsTable); err != nil {
+		return fmt.Errorf("sqlite: create schema_migrations: %w", err)
+	}
+
 	known := make(map[int]migration, len(migs))
 	maxKnown := 0
 	for _, m := range migs {
@@ -133,7 +142,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		if _, ok := applied[m.version]; ok {
 			continue
 		}
-		if err := applyMigration(ctx, db, m); err != nil {
+		if err := applyMigration(ctx, db, m, now); err != nil {
 			return err
 		}
 	}
@@ -162,16 +171,13 @@ func appliedMigrations(ctx context.Context, db *sql.DB) (map[int]string, error) 
 	return applied, nil
 }
 
-// applyMigration runs one migration's SQL and records it in
-// schema_migrations inside a single transaction.
-//
-// applied_at uses time.Now() directly rather than an injected Clock: this
-// package intentionally imports nothing beyond stdlib, modernc.org/sqlite,
-// and internal/model, so internal/clock is not available here, and a
-// migration timestamp is infrastructure bookkeeping (when this binary
-// touched the schema file) rather than domain/business time subject to
-// backtest replay.
-func applyMigration(ctx context.Context, db *sql.DB, m migration) (err error) {
+// applyMigration runs one migration's SQL and records it in schema_migrations
+// inside a single transaction, so the DDL and its schema_migrations row commit
+// or roll back atomically: a migration whose SQL fails partway leaves neither
+// the partial schema change nor a version row behind. applied_at comes from the
+// injected now func (DESIGN §3's no-time.Now rule) and is stored in the same
+// fixed-width UTC form as every other timestamp column.
+func applyMigration(ctx context.Context, db *sql.DB, m migration, now func() time.Time) (err error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("sqlite: begin migration %d tx: %w", m.version, err)
@@ -187,7 +193,7 @@ func applyMigration(ctx context.Context, db *sql.DB, m migration) (err error) {
 	}
 	if _, err = tx.ExecContext(ctx,
 		`INSERT INTO schema_migrations (version, checksum, applied_at) VALUES (?, ?, ?)`,
-		m.version, m.checksum, time.Now().UTC().Format(time.RFC3339Nano),
+		m.version, m.checksum, timeText(now()),
 	); err != nil {
 		return fmt.Errorf("sqlite: record migration %d: %w", m.version, err)
 	}

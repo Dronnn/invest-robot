@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -26,20 +28,22 @@ type DB struct {
 // SQLite database at path, applies the storage-discipline pragmas, and runs
 // any pending embedded migrations.
 //
-// Connection pool: MaxOpenConns is pinned to 1. SQLite permits only one
-// writer at a time, and Phase 1's access pattern is low-frequency (one
-// decision cycle at a time plus a handful of collectors) — rather than run a
-// multi-connection pool and handle SQLITE_BUSY contention between readers and
-// a writer, every statement is serialized through database/sql's own pool
-// discipline against a single physical connection. This also sidesteps a
-// real correctness hazard: journal_mode and foreign_keys are per-connection
-// pragmas in SQLite (journal_mode is persisted in the file after the first
-// set, but foreign_keys and busy_timeout are not), so a pool that opened
-// additional connections would need every new connection to re-apply them —
-// database/sql has no connection-open hook to do that. Pinning to one
-// connection for the lifetime of the *DB makes "set once at Open" correct.
-// Revisit (e.g. a real connect hook, or a read-only second pool) if profiling
-// ever shows this serialization is a bottleneck.
+// Pragmas are carried on the DSN (_pragma=… query parameters) rather than
+// executed once after opening. journal_mode, foreign_keys, busy_timeout and
+// synchronous are per-connection settings in SQLite (only journal_mode's WAL
+// switch persists in the file); the modernc.org/sqlite driver re-runs every
+// DSN _pragma on each new physical connection it opens, so a connection the
+// database/sql pool silently discards and replaces still comes up with foreign
+// keys on and the busy timeout set. Setting them once on the first connection
+// (the previous approach) left any replacement connection running with
+// foreign_keys=OFF.
+//
+// MaxOpenConns is still pinned to 1: SQLite permits a single writer, and Phase
+// 1's access pattern is low-frequency, so serializing every statement onto one
+// physical connection sidesteps SQLITE_BUSY contention entirely. The DSN
+// pragmas make that pin a defense-in-depth measure for correctness rather than
+// the sole thing keeping the pragmas applied. Revisit (e.g. a read-only second
+// pool) only if profiling ever shows the serialization is a bottleneck.
 func Open(ctx context.Context, path string) (*DB, error) {
 	if dir := filepath.Dir(path); dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -47,18 +51,13 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		}
 	}
 
-	sqlDB, err := sql.Open(driverName, path)
+	sqlDB, err := sql.Open(driverName, pragmaDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: open %s: %w", path, err)
 	}
 	sqlDB.SetMaxOpenConns(1)
 
-	if err := applyPragmas(ctx, sqlDB); err != nil {
-		sqlDB.Close()
-		return nil, err
-	}
-
-	if err := migrate(ctx, sqlDB); err != nil {
+	if err := migrate(ctx, sqlDB, func() time.Time { return time.Now().UTC() }); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("sqlite: migrate %s: %w", path, err)
 	}
@@ -66,21 +65,25 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	return &DB{DB: sqlDB}, nil
 }
 
-// pragmas are applied in order on Open. synchronous=NORMAL is safe under WAL
-// (only journal_mode=DELETE requires FULL for crash safety); busy_timeout is
-// in milliseconds.
-var pragmas = []string{
-	"PRAGMA journal_mode = WAL",
-	"PRAGMA foreign_keys = ON",
-	"PRAGMA busy_timeout = 5000",
-	"PRAGMA synchronous = NORMAL",
+// connPragmas are applied to every physical connection via the DSN. Order is
+// irrelevant — the driver sorts busy_timeout first regardless. synchronous=
+// NORMAL is safe under WAL (only journal_mode=DELETE requires FULL for crash
+// safety); busy_timeout is in milliseconds.
+var connPragmas = []string{
+	"journal_mode(WAL)",
+	"foreign_keys(1)",
+	"busy_timeout(5000)",
+	"synchronous(NORMAL)",
 }
 
-func applyPragmas(ctx context.Context, db *sql.DB) error {
-	for _, p := range pragmas {
-		if _, err := db.ExecContext(ctx, p); err != nil {
-			return fmt.Errorf("sqlite: apply %q: %w", p, err)
-		}
+// pragmaDSN builds the modernc.org/sqlite connection string for path with the
+// storage-discipline pragmas attached as _pragma query parameters. path is a
+// plain filename (not a file: URI), so the driver strips the query before
+// opening the file but still applies every _pragma per connection.
+func pragmaDSN(path string) string {
+	q := url.Values{}
+	for _, p := range connPragmas {
+		q.Add("_pragma", p)
 	}
-	return nil
+	return path + "?" + q.Encode()
 }
