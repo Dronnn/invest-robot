@@ -4,6 +4,7 @@ run:
 	go run ./cmd/robot
 
 build:
+	mkdir -p bin
 	go build -o bin/robot ./cmd/robot
 
 test:
