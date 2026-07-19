@@ -85,6 +85,12 @@ func TestOnQuote_MarketBuyFillPriceAndCommission(t *testing.T) {
 	if !f.TS.Equal(base) {
 		t.Errorf("fill ts = %s, want %s (clock time)", f.TS, base)
 	}
+	if f.LowFidelity {
+		t.Error("fills.low_fidelity = true, want false (priced from a real ask, not the last-price fallback)")
+	}
+	if f.RealizedPnL != nil {
+		t.Errorf("fills.realized_pnl = %v, want nil (a buy fill, and execution never sets it)", f.RealizedPnL)
+	}
 
 	rec := applier.recorded()
 	if len(rec) != 1 {
@@ -189,7 +195,8 @@ func TestOnQuote_OutsideSessionRests(t *testing.T) {
 }
 
 // TestSubmit_RejectsBadInstrumentData journals the intent, then rejects it when
-// the instrument's tick is unknown, and records the reason as an event.
+// the instrument's tick is unknown, recording the reason both as an event and
+// on the intent row itself (order_intents.reason).
 func TestSubmit_RejectsBadInstrumentData(t *testing.T) {
 	db := openDB(t)
 	clk := clock.NewSimulated(base)
@@ -206,6 +213,13 @@ func TestSubmit_RejectsBadInstrumentData(t *testing.T) {
 	}
 	if got := reasonEventCount(t, db, "order_rejected", id); got != 1 {
 		t.Fatalf("order_rejected events for %s = %d, want 1", id, got)
+	}
+	in, err := (sqlite.IntentRepo{}).Get(context.Background(), db, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if in.Reason == "" {
+		t.Error("order_intents.reason is empty, want the rejection prose persisted on the row")
 	}
 }
 

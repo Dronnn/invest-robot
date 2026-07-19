@@ -263,20 +263,19 @@ func (s *Simulator) settle(ctx context.Context, in model.OrderIntent, price mode
 		if err := s.journal.Transition(ctx, tx, in.ClientOrderID, model.IntentAcked, model.IntentFilled); err != nil {
 			return err
 		}
-		if err := (sqlite.FillRepo{}).Insert(ctx, tx, fill); err != nil {
+		if err := (sqlite.FillRepo{}).Insert(ctx, tx, fill, lowFidelity); err != nil {
 			return err
 		}
 		return s.applier.ApplyFill(ctx, tx, fa)
 	})
 }
 
-// reject moves a journaled intent to the terminal rejected state and records the
-// human-readable reason as an event (order_intents has no reason column; the
-// state lands on the row, the prose lands in the durable events log, DESIGN
-// §12). Both writes commit together.
+// reject moves a journaled intent to the terminal rejected state, recording
+// the human-readable reason both on the intent row (order_intents.reason)
+// and as an event (DESIGN §12's durable log). Both writes commit together.
 func (s *Simulator) reject(ctx context.Context, clientOrderID string, from model.IntentState, reason string, now time.Time) error {
 	return sqlite.WithTx(ctx, s.db, func(ctx context.Context, tx *sql.Tx) error {
-		if err := s.journal.Transition(ctx, tx, clientOrderID, from, model.IntentRejected); err != nil {
+		if err := s.journal.TransitionWithReason(ctx, tx, clientOrderID, from, model.IntentRejected, reason); err != nil {
 			return err
 		}
 		return s.event(ctx, tx, "order_rejected", map[string]string{

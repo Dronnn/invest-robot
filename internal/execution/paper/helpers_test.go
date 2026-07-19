@@ -207,7 +207,7 @@ func stateOf(t *testing.T, db *sqlite.DB, id string) model.IntentState {
 	return in.State
 }
 
-func fillsOf(t *testing.T, db *sqlite.DB, id string) []model.Fill {
+func fillsOf(t *testing.T, db *sqlite.DB, id string) []sqlite.FillRecord {
 	t.Helper()
 	fs, err := (sqlite.FillRepo{}).ListByIntent(context.Background(), db, id)
 	if err != nil {
