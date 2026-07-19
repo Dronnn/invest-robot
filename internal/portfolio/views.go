@@ -65,7 +65,7 @@ type DayPnLResult struct {
 // relative to sessionStart:
 //
 //	Total      = latestSnapshot.Total - sessionStartSnapshot.Total
-//	Realized   = sum of every realized_pnl cash_ledger entry with ts >= sessionStart
+//	Realized   = sum of fills.realized_pnl for every fill with ts >= sessionStart
 //	Unrealized = Total - Realized
 //
 // Unrealized is deliberately the algebraic residual rather than a direct
@@ -117,29 +117,25 @@ func (p *Portfolio) DayPnL(ctx context.Context, q sqlite.Querier, sessionStart t
 	return DayPnLResult{Realized: realized, Unrealized: unrealized, Total: total}, nil
 }
 
-// realizedSince sums the decoded PnL magnitude of every realized_pnl
-// cash_ledger row with ts >= sessionStart. CashRepo exposes no time-ranged
-// or reason-filtered read, only Recent(limit) and Balance(currency), so this
-// walks the full ledger via Recent(ctx, q, -1) — a negative limit is
+// realizedSince sums fills.realized_pnl across every fill with ts >=
+// sessionStart (a buy fill's realized_pnl is always nil and contributes
+// nothing). FillRepo exposes no time-ranged read narrower than "every fill",
+// so this walks the full table via Recent(ctx, q, -1) — a negative limit is
 // SQLite's documented "no upper bound" — and filters/sums in Go. Acceptable
-// at this project's scale (a personal trading robot's cash_ledger is not
+// at this project's scale (a personal trading robot's fills table is not
 // going to reach a size where this is a bottleneck); if it ever became one,
-// CashRepo would need a since-timestamp query.
+// FillRepo would need a since-timestamp query.
 func (p *Portfolio) realizedSince(ctx context.Context, q sqlite.Querier, sessionStart time.Time) (model.Decimal, error) {
-	entries, err := (sqlite.CashRepo{}).Recent(ctx, q, -1)
+	fills, err := (sqlite.FillRepo{}).Recent(ctx, q, -1)
 	if err != nil {
-		return model.Decimal{}, fmt.Errorf("portfolio: day pnl: recent cash entries: %w", err)
+		return model.Decimal{}, fmt.Errorf("portfolio: day pnl: recent fills: %w", err)
 	}
 	var sum model.Decimal
-	for _, e := range entries {
-		if e.Reason != reasonRealizedPnL || e.TS.Before(sessionStart) {
+	for _, f := range fills {
+		if f.RealizedPnL == nil || f.TS.Before(sessionStart) {
 			continue
 		}
-		_, pnl, ok := decodeRealizedPnLRef(e.Ref)
-		if !ok {
-			continue // defensive: a realized_pnl row not written by this package
-		}
-		v, err := sum.Add(pnl)
+		v, err := sum.Add(*f.RealizedPnL)
 		if err != nil {
 			return model.Decimal{}, fmt.Errorf("portfolio: day pnl: realized sum overflow: %w", err)
 		}

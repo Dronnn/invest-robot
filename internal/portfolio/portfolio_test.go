@@ -184,31 +184,21 @@ func TestApplyFill_SellPartialThenFullClose(t *testing.T) {
 	}
 }
 
-// realizedPnLFor finds the realized_pnl cash_ledger row written for
-// intentID and decodes its PnL magnitude from ref.
+// realizedPnLFor reads back fills.realized_pnl for intentID. Phase 1 assumes
+// full fills, so exactly one fill row is expected per intent.
 func realizedPnLFor(t *testing.T, ctx context.Context, db *sqlite.DB, intentID string) model.Decimal {
 	t.Helper()
-	entries, err := (sqlite.CashRepo{}).Recent(ctx, db, -1)
+	fills, err := (sqlite.FillRepo{}).ListByIntent(ctx, db, intentID)
 	if err != nil {
-		t.Fatalf("recent: %v", err)
+		t.Fatalf("ListByIntent %s: %v", intentID, err)
 	}
-	for _, e := range entries {
-		if e.Reason != reasonRealizedPnL {
-			continue
-		}
-		gotIntent, pnl, ok := decodeRealizedPnLRef(e.Ref)
-		if !ok {
-			t.Fatalf("realized_pnl entry has undecodable ref %q", e.Ref)
-		}
-		if gotIntent == intentID {
-			if !e.Delta.IsZero() {
-				t.Errorf("realized_pnl entry delta = %s, want 0 (bookkeeping-only, must not affect cash balance)", e.Delta)
-			}
-			return pnl
-		}
+	if len(fills) != 1 {
+		t.Fatalf("len(fills) for %s = %d, want 1", intentID, len(fills))
 	}
-	t.Fatalf("no realized_pnl entry found for intent %s", intentID)
-	return model.Decimal{}
+	if fills[0].RealizedPnL == nil {
+		t.Fatalf("fills.realized_pnl for %s is nil, want a value", intentID)
+	}
+	return *fills[0].RealizedPnL
 }
 
 func TestApplyFill_OversellRejected(t *testing.T) {
@@ -232,7 +222,7 @@ func TestApplyFill_OversellRejected(t *testing.T) {
 	// unwritten.
 	oversellFill := model.Fill{IntentID: "sell-1", Price: mustDecimal(t, "100"), Qty: 6, Fee: model.Decimal{}, TS: nowUTC()}
 	err := sqlite.WithTx(ctx, db.DB, func(ctx context.Context, tx *sql.Tx) error {
-		if err := (sqlite.FillRepo{}).Insert(ctx, tx, oversellFill); err != nil {
+		if err := (sqlite.FillRepo{}).Insert(ctx, tx, oversellFill, false); err != nil {
 			return err
 		}
 		return p.ApplyFill(ctx, tx, FillApplication{
@@ -339,7 +329,7 @@ func TestApplyFill_WithTxRollbackLeavesNoPartialRows(t *testing.T) {
 	err := sqlite.WithTx(ctx, db.DB, func(ctx context.Context, tx *sql.Tx) error {
 		// Mirror the real call order: execution inserts the fills row, then
 		// calls ApplyFill, both inside the same transaction.
-		if err := (sqlite.FillRepo{}).Insert(ctx, tx, fill); err != nil {
+		if err := (sqlite.FillRepo{}).Insert(ctx, tx, fill, false); err != nil {
 			return err
 		}
 		if err := p.ApplyFill(ctx, tx, FillApplication{

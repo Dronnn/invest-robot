@@ -3,23 +3,19 @@ package portfolio
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/Dronnn/invest-robot/internal/clock"
 	"github.com/Dronnn/invest-robot/internal/model"
 	"github.com/Dronnn/invest-robot/internal/store/sqlite"
 )
 
-// Reason codes written to cash_ledger.reason. fill/fee/deposit match
-// DESIGN.md §5's documented set; realizedPnLReason is a portfolio-internal
-// addition (see the doc comment on the realized-PnL encoding below) — it was
-// not in the original enumeration and callers reading cash_ledger elsewhere
-// should be aware a "realized_pnl" reason now exists, always with delta=0.
+// Reason codes written to cash_ledger.reason — exactly DESIGN.md §5's
+// documented fill|fee|deposit|dividend set (Phase 1 writes fill/fee/deposit
+// only; dividend arrives with corporate actions, out of scope).
 const (
-	reasonFill        = "fill"
-	reasonFee         = "fee"
-	reasonDeposit     = "deposit"
-	reasonRealizedPnL = "realized_pnl"
+	reasonFill    = "fill"
+	reasonFee     = "fee"
+	reasonDeposit = "deposit"
 )
 
 // Portfolio is the transactional owner of one account's cash, positions,
@@ -83,9 +79,9 @@ func (p *Portfolio) Init(ctx context.Context, q sqlite.Querier, starting model.D
 // looked up so ApplyFill never needs instrument metadata to price cash and
 // position effects. LowFidelity flags a fill priced via the paper
 // simulator's last-price fallback (DESIGN.md §7); ApplyFill accepts it for
-// contract completeness but does not currently act on it — see the Step 11
-// log for why (no fills.low_fidelity column exists to persist it, and the
-// cash/position math for a real fill does not depend on how it was priced).
+// contract completeness but does not act on it — execution persists it on
+// the fills row itself (fills.low_fidelity) before ApplyFill runs, and the
+// cash/position math for a real fill does not depend on how it was priced.
 type FillApplication struct {
 	Fill          model.Fill
 	InstrumentUID model.InstrumentUID
@@ -133,13 +129,13 @@ func (fa FillApplication) validate() error {
 // each reason, so a downstream "total fees" query never has to special-case
 // absence.
 //
-// A sell writes three: reason=fill (delta = +price*qty*lot), reason=fee
-// (delta = -fee), and reason=realized_pnl. The realized_pnl row always has
-// delta=0 — the sell's actual cash effect is already fully captured by the
-// paired fill/fee rows, and CashRepo.Balance sums every row for a currency
-// regardless of reason, so a non-zero delta here would double-count. The
-// realized PnL magnitude instead travels in Ref as "<intentID>|<pnl decimal
-// string>", which DayPnL parses back out; see decodeRealizedPnLRef.
+// A sell writes the same two cash_ledger rows (reason=fill credits the
+// notional, reason=fee debits the commission) plus one FillRepo.SetRealizedPnL
+// call that sets fills.realized_pnl for this fill's row — the sell's PnL
+// against the position's average price, computed here where the pre-fill
+// average is known. This does not touch cash_ledger at all: realized PnL is
+// informational (already fully captured by the fill/fee rows above), not a
+// separate cash movement.
 //
 // Selling more lots than the position holds returns *OversellError and
 // writes nothing (Phase 1 forbids shorting). A position that fully closes
@@ -229,10 +225,8 @@ func (p *Portfolio) ApplyFill(ctx context.Context, q sqlite.Querier, fa FillAppl
 		}); err != nil {
 			return fmt.Errorf("portfolio: apply fill: insert fee cash entry: %w", err)
 		}
-		if _, err := (sqlite.CashRepo{}).Insert(ctx, q, sqlite.CashEntry{
-			TS: now, Delta: model.Decimal{}, Currency: p.currency, Reason: reasonRealizedPnL, Ref: encodeRealizedPnLRef(fa.Fill.IntentID, pnl),
-		}); err != nil {
-			return fmt.Errorf("portfolio: apply fill: insert realized pnl entry: %w", err)
+		if err := (sqlite.FillRepo{}).SetRealizedPnL(ctx, q, fa.Fill.IntentID, pnl); err != nil {
+			return fmt.Errorf("portfolio: apply fill: set realized pnl: %w", err)
 		}
 
 	default:
@@ -279,28 +273,4 @@ func recomputeAvgPrice(existingAvg model.Decimal, existingQty int64, price model
 		return model.Decimal{}, fmt.Errorf("recompute avg price: division overflow: %w", err)
 	}
 	return avg, nil
-}
-
-// encodeRealizedPnLRef packs a realized-PnL cash_ledger row's informational
-// payload into Ref: "<intentID>|<pnl decimal string>". This is safe because
-// cash_ledger.ref is documented as free-form and reason-dependent
-// (0001_init.sql) and a client_order_id is a UUID (never contains '|').
-func encodeRealizedPnLRef(intentID string, pnl model.Decimal) string {
-	return intentID + "|" + pnl.String()
-}
-
-// decodeRealizedPnLRef reverses encodeRealizedPnLRef. ok is false for any
-// ref that doesn't match the expected shape (defensive — should only occur
-// if cash_ledger is read back for a reason=realized_pnl row this package did
-// not itself write).
-func decodeRealizedPnLRef(ref string) (intentID string, pnl model.Decimal, ok bool) {
-	i := strings.LastIndexByte(ref, '|')
-	if i < 0 {
-		return "", model.Decimal{}, false
-	}
-	d, err := model.ParseDecimal(ref[i+1:])
-	if err != nil {
-		return "", model.Decimal{}, false
-	}
-	return ref[:i], d, true
 }

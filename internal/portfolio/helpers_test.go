@@ -102,7 +102,7 @@ func seedIntent(t *testing.T, db *sqlite.DB, uid model.InstrumentUID, clientOrde
 // that wouldn't really exist yet.
 func applyFillViaExecution(t *testing.T, ctx context.Context, p *Portfolio, q sqlite.Querier, fa FillApplication) error {
 	t.Helper()
-	if err := (sqlite.FillRepo{}).Insert(ctx, q, fa.Fill); err != nil {
+	if err := (sqlite.FillRepo{}).Insert(ctx, q, fa.Fill, fa.LowFidelity); err != nil {
 		t.Fatalf("seed fill row for %s: %v", fa.Fill.IntentID, err)
 	}
 	return p.ApplyFill(ctx, q, fa)
