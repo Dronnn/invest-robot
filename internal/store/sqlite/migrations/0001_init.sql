@@ -109,7 +109,6 @@ CREATE TABLE order_intents (
     limit_price     TEXT,
     time_in_force   TEXT NOT NULL CHECK (time_in_force IN ('day', 'ioc')),
     state           TEXT NOT NULL CHECK (state IN ('new', 'submitted', 'acked', 'filled', 'canceled', 'rejected', 'unknown')),
-    reason          TEXT,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
@@ -134,9 +133,7 @@ CREATE TABLE fills (
     price           TEXT NOT NULL,
     qty             INTEGER NOT NULL,
     fee             TEXT NOT NULL,
-    ts              TEXT NOT NULL,
-    realized_pnl    TEXT,
-    low_fidelity    INTEGER NOT NULL DEFAULT 0
+    ts              TEXT NOT NULL
 );
 CREATE INDEX idx_fills_order_intent ON fills (order_intent_id, ts ASC, id ASC);
 

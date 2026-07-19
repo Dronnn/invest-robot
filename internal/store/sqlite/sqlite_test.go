@@ -134,8 +134,8 @@ func TestMigrate_AppliesFromEmpty(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatalf("query schema_migrations: %v", err)
 	}
-	if version != 1 {
-		t.Errorf("max applied version = %d, want 1", version)
+	if want := wantLatestMigrationVersion(t); version != want {
+		t.Errorf("max applied version = %d, want %d", version, want)
 	}
 
 	tables := []string{
@@ -172,8 +172,12 @@ func TestMigrate_IdempotentReopen(t *testing.T) {
 	if err := db2.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatalf("query schema_migrations: %v", err)
 	}
-	if count != 1 {
-		t.Errorf("schema_migrations row count = %d, want 1 (reapplying must be a no-op)", count)
+	migs, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("loadMigrations: %v", err)
+	}
+	if want := len(migs); count != want {
+		t.Errorf("schema_migrations row count = %d, want %d (reapplying must be a no-op)", count, want)
 	}
 }
 
@@ -219,6 +223,22 @@ func TestMigrate_RefusesNewerDatabase(t *testing.T) {
 // fixedNow is an injected migration clock for the migration tests.
 func fixedNow() time.Time { return time.Date(2026, 7, 19, 0, 0, 0, 0, time.UTC) }
 
+// wantLatestMigrationVersion returns the highest version among the embedded
+// migrations, so tests assert against the schema as it evolves instead of a
+// hardcoded number that has to be bumped by hand for every new migration
+// file.
+func wantLatestMigrationVersion(t *testing.T) int {
+	t.Helper()
+	migs, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("loadMigrations: %v", err)
+	}
+	if len(migs) == 0 {
+		t.Fatal("no embedded migrations found")
+	}
+	return migs[len(migs)-1].version
+}
+
 // rawTestDB opens a database without running the embedded migrations, so a test
 // can drive applyMigrations with its own synthetic migration set.
 func rawTestDB(t *testing.T) *sql.DB {
@@ -243,7 +263,7 @@ func testMigration(version int, name, sqlText string) migration {
 
 // TestApplyMigrations_UpgradeFromPriorVersionFixture opens a committed
 // database file that predates the migration system (version 0, carrying a
-// legacy marker row) and upgrades it in place through Open. It proves the
+// legacy marker row) and upgrades it in place through Open. It proves every
 // pending migration applies to an existing file and does not disturb data
 // already there — the design-required prior-version upgrade path.
 func TestApplyMigrations_UpgradeFromPriorVersionFixture(t *testing.T) {
@@ -270,8 +290,8 @@ func TestApplyMigrations_UpgradeFromPriorVersionFixture(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatalf("query schema_migrations: %v", err)
 	}
-	if version != 1 {
-		t.Errorf("version after upgrade = %d, want 1", version)
+	if want := wantLatestMigrationVersion(t); version != want {
+		t.Errorf("version after upgrade = %d, want %d", version, want)
 	}
 
 	// The pending migration's tables now exist.
@@ -287,6 +307,113 @@ func TestApplyMigrations_UpgradeFromPriorVersionFixture(t *testing.T) {
 	}
 	if note != "pre-migration-v0" {
 		t.Errorf("legacy_marker note = %q, want pre-migration-v0", note)
+	}
+}
+
+// TestApplyMigrations_UpgradeFromRestoredV1 builds a database with only the
+// restored, published v1 schema applied (no reason/realized_pnl/low_fidelity
+// columns — those were briefly and wrongly folded into 0001_init.sql before
+// release, then split out into migration 2) and seeds it with data in that
+// original shape. It then proves the full embedded migration set upgrades it
+// cleanly: v2's columns exist and are writable, the new
+// one-fill-per-intent unique index is enforced, and the pre-existing rows
+// survive untouched. This is the exact shape any database created before v2
+// shipped will be in the next time it opens.
+func TestApplyMigrations_UpgradeFromRestoredV1(t *testing.T) {
+	ctx := context.Background()
+	db := rawTestDB(t)
+
+	migs, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("loadMigrations: %v", err)
+	}
+	var v1 migration
+	haveV1 := false
+	for _, m := range migs {
+		if m.version == 1 {
+			v1, haveV1 = m, true
+			break
+		}
+	}
+	if !haveV1 {
+		t.Fatal("migration version 1 not found among embedded migrations")
+	}
+
+	if err := applyMigrations(ctx, db, []migration{v1}, fixedNow); err != nil {
+		t.Fatalf("apply restored v1 alone: %v", err)
+	}
+
+	// Seed data in the original v1 shape — no reason/realized_pnl/low_fidelity
+	// columns exist yet at this point.
+	now := timeText(fixedNow())
+	if _, err := db.ExecContext(ctx, `INSERT INTO instruments (uid, figi, ticker, class_code, lot, min_price_increment, currency, name, cached_at)
+		VALUES ('uid-1', 'figi-1', 'TICK', 'TQBR', 10, '0.01', 'RUB', 'Test', ?)`, now); err != nil {
+		t.Fatalf("seed instrument: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO cycles (started_at, as_of, mode, engine, engine_version, prompt_template_hash, config_snapshot, status)
+		VALUES (?, ?, 'paper', 'rules', 'v1', 'hash', '{}', 'done')`, now, now); err != nil {
+		t.Fatalf("seed cycle: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO decisions (cycle_id, instrument_uid, action, qty, order_type, time_in_force, rationale, confidence, validation_status)
+		VALUES (1, 'uid-1', 'buy', 1, 'market', 'day', 'because', 1.0, 'ok')`); err != nil {
+		t.Fatalf("seed decision: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO order_intents (client_order_id, decision_id, instrument_uid, side, qty, type, time_in_force, state, created_at, updated_at)
+		VALUES ('intent-1', 1, 'uid-1', 'buy', 1, 'market', 'day', 'filled', ?, ?)`, now, now); err != nil {
+		t.Fatalf("seed order intent in the original v1 shape (no reason column): %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO fills (order_intent_id, price, qty, fee, ts) VALUES ('intent-1', '100', 1, '0.1', ?)`, now); err != nil {
+		t.Fatalf("seed fill in the original v1 shape (no realized_pnl/low_fidelity columns): %v", err)
+	}
+
+	// Upgrade in place with the full embedded migration set (v1 already
+	// applied and unchanged, v2 pending).
+	if err := applyMigrations(ctx, db, migs, fixedNow); err != nil {
+		t.Fatalf("upgrade restored v1 to latest: %v", err)
+	}
+
+	var maxVersion int
+	if err := db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&maxVersion); err != nil {
+		t.Fatalf("query version: %v", err)
+	}
+	if want := migs[len(migs)-1].version; maxVersion != want {
+		t.Errorf("version after upgrade = %d, want %d", maxVersion, want)
+	}
+
+	// The pre-existing rows survived untouched.
+	var side, state string
+	if err := db.QueryRowContext(ctx, `SELECT side, state FROM order_intents WHERE client_order_id = 'intent-1'`).Scan(&side, &state); err != nil {
+		t.Fatalf("read order intent after upgrade: %v", err)
+	}
+	if side != "buy" || state != "filled" {
+		t.Errorf("order intent after upgrade = {side:%s state:%s}, want {buy filled}", side, state)
+	}
+
+	var price string
+	var lowFidelity int
+	var realizedPnL sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT price, low_fidelity, realized_pnl FROM fills WHERE order_intent_id = 'intent-1'`).
+		Scan(&price, &lowFidelity, &realizedPnL); err != nil {
+		t.Fatalf("read fill after upgrade: %v", err)
+	}
+	if price != "100" {
+		t.Errorf("fill price after upgrade = %q, want 100 (pre-existing data must survive)", price)
+	}
+	if lowFidelity != 0 {
+		t.Errorf("fill low_fidelity after upgrade = %d, want 0 (v2's DEFAULT backfilling a pre-existing row)", lowFidelity)
+	}
+	if realizedPnL.Valid {
+		t.Errorf("fill realized_pnl after upgrade = %v, want NULL for a pre-existing row", realizedPnL)
+	}
+
+	// v2's new columns are usable going forward.
+	if _, err := db.ExecContext(ctx, `UPDATE order_intents SET reason = 'because' WHERE client_order_id = 'intent-1'`); err != nil {
+		t.Errorf("write order_intents.reason after upgrade: %v", err)
+	}
+
+	// The new unique index enforces one fill per intent.
+	if _, err := db.ExecContext(ctx, `INSERT INTO fills (order_intent_id, price, qty, fee, ts) VALUES ('intent-1', '101', 1, '0.1', ?)`, now); err == nil {
+		t.Error("expected a second fill for the same intent to violate the new UNIQUE(order_intent_id) index, got nil error")
 	}
 }
 
