@@ -166,6 +166,88 @@ func TestSimulated_ConcurrentNowVsAdvance(t *testing.T) {
 	<-done
 }
 
+func TestSimulated_NowIsUTC(t *testing.T) {
+	msk := time.Date(2026, 7, 19, 15, 0, 0, 0, time.FixedZone("MSK", 3*60*60))
+	c := NewSimulated(msk)
+	if loc := c.Now().Location(); loc != time.UTC {
+		t.Errorf("Now().Location() = %v, want UTC", loc)
+	}
+	if !c.Now().Equal(msk) {
+		t.Errorf("Now() = %v, want the same instant as %v", c.Now(), msk)
+	}
+	c.Advance(time.Hour)
+	if loc := c.Now().Location(); loc != time.UTC {
+		t.Errorf("Now().Location() after Advance = %v, want UTC", loc)
+	}
+}
+
+func TestSimulated_TickerCoalescesToOnePerAdvance(t *testing.T) {
+	c := NewSimulated(base)
+	tk := c.NewTicker(time.Second)
+	defer tk.Stop()
+
+	// Five period boundaries fall inside this single advance; they must
+	// coalesce into exactly one tick carrying the most recent boundary.
+	c.Advance(5 * time.Second)
+	got, ok := recvReady(tk.C())
+	if !ok {
+		t.Fatal("expected one coalesced tick")
+	}
+	if want := base.Add(5 * time.Second); !got.Equal(want) {
+		t.Errorf("coalesced tick = %v, want the most recent boundary %v", got, want)
+	}
+	if _, ok := recvReady(tk.C()); ok {
+		t.Fatal("expected only one tick per advance, got a second")
+	}
+}
+
+// TestSimulated_DeterministicTickCountUnderConcurrency is the regression for
+// the replay-determinism fix: with a consumer draining concurrently (exercised
+// under -race), an identical sequence of advances must produce an identical
+// observable tick count every run. The consumer acks each tick so the producer
+// advances in lockstep — the scheduler's drain-between-advances contract — and
+// the count is asserted equal to the number of advances across 100 runs.
+func TestSimulated_DeterministicTickCountUnderConcurrency(t *testing.T) {
+	const advances = 50
+	for iter := 0; iter < 100; iter++ {
+		c := NewSimulated(base)
+		tk := c.NewTicker(time.Second)
+
+		ack := make(chan struct{})
+		done := make(chan struct{})
+		counts := make(chan int, 1)
+		go func() {
+			got := 0
+			for {
+				select {
+				case <-tk.C():
+					got++
+					select {
+					case ack <- struct{}{}:
+					case <-done:
+						counts <- got
+						return
+					}
+				case <-done:
+					counts <- got
+					return
+				}
+			}
+		}()
+
+		for i := 0; i < advances; i++ {
+			c.Advance(time.Second)
+			<-ack // this advance's tick was observed before the next
+		}
+		close(done)
+		tk.Stop()
+
+		if got := <-counts; got != advances {
+			t.Fatalf("iteration %d: observed %d ticks, want %d (tick count must be deterministic)", iter, got, advances)
+		}
+	}
+}
+
 // TestSimulated_ConcurrentTickerConsume runs Advance concurrently with a
 // consumer draining the ticker channel, exercising the send/receive path under
 // -race. Ticks may be dropped (drop-on-full semantics), so it asserts only

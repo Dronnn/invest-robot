@@ -15,6 +15,12 @@ func TestReal_Now(t *testing.T) {
 	}
 }
 
+func TestReal_NowIsUTC(t *testing.T) {
+	if loc := Real().Now().Location(); loc != time.UTC {
+		t.Errorf("Real().Now().Location() = %v, want UTC", loc)
+	}
+}
+
 func TestReal_After(t *testing.T) {
 	c := Real()
 	select {

@@ -6,14 +6,24 @@ import (
 )
 
 // Simulated is a deterministic Clock whose time only moves when Advance is
-// called. Timers and tickers created against it fire, in ascending fire-time
-// order, as Advance crosses their due times. It is safe for concurrent use.
+// called. Timers and tickers created against it fire as Advance crosses their
+// due times. It is safe for concurrent use, and all times it reports are UTC.
 //
-// Delivery mirrors time.Ticker/time.After: each timer or ticker channel is
-// buffered with capacity one, and a fire whose buffer is already full is
-// dropped rather than blocking Advance. Consumers that must not miss ticks
-// therefore drain between advances; the robot's scheduler coalesces overruns
-// by design, so drop-on-full is the intended behavior.
+// Determinism under concurrency is the whole point (honest replay depends on
+// it): a single Advance delivers at most one tick per ticker, no matter how
+// many period boundaries the advance crosses. Multiple crossed boundaries
+// coalesce into one tick carrying the most recent boundary. Because the number
+// of ticks a concurrent consumer can observe per Advance is therefore fixed at
+// 0 or 1 per ticker — independent of goroutine scheduling — an identical
+// sequence of advances always produces an identical observable tick count.
+// (The previous design sent every crossed boundary in a loop, so a consumer
+// draining mid-loop saw a scheduling-dependent count.)
+//
+// Delivery still mirrors time.Ticker/time.After otherwise: each channel is
+// buffered with capacity one, and a tick whose buffer is already full is
+// dropped rather than blocking Advance. Consumers that must observe every tick
+// drain between advances; the robot's scheduler coalesces overruns by design
+// (DESIGN §6), so drop-on-full is intended.
 type Simulated struct {
 	mu     sync.Mutex
 	now    time.Time
@@ -29,9 +39,10 @@ type simEvent struct {
 	stopped bool
 }
 
-// NewSimulated returns a Simulated clock starting at the given time.
+// NewSimulated returns a Simulated clock starting at the given time, normalized
+// to UTC so every time it later reports (Now, After/ticker fire times) is UTC.
 func NewSimulated(start time.Time) *Simulated {
-	return &Simulated{now: start}
+	return &Simulated{now: start.UTC()}
 }
 
 // Now returns the current simulated time.
@@ -66,9 +77,14 @@ func (s *Simulated) NewTicker(d time.Duration) Ticker {
 	return &simTicker{sim: s, ev: ev}
 }
 
-// Advance moves simulated time forward by d, firing every due timer and ticker
-// in ascending fire-time order (ties break by creation order). It panics on a
-// negative d.
+// Advance moves simulated time forward by d, delivering every due timer and
+// ticker. A one-shot (After) whose deadline is at or before the new time fires
+// once and is removed. A ticker fires at most once regardless of how many of
+// its period boundaries fall in the advanced span: the crossings coalesce into
+// a single tick carrying the most recent boundary, and the ticker is rescheduled
+// to the first boundary strictly after the new time. This at-most-one-per-ticker
+// rule is what makes the observable tick count independent of consumer
+// scheduling. Advance panics on a negative d.
 func (s *Simulated) Advance(d time.Duration) {
 	if d < 0 {
 		panic("clock: negative advance duration")
@@ -77,29 +93,22 @@ func (s *Simulated) Advance(d time.Duration) {
 	defer s.mu.Unlock()
 
 	target := s.now.Add(d)
-	for {
-		idx := -1
-		var best time.Time
-		for i, ev := range s.events {
-			if ev.stopped || ev.at.After(target) {
-				continue
-			}
-			if idx == -1 || ev.at.Before(best) {
-				idx, best = i, ev.at
-			}
+	// Iterate in creation order. Because each event owns a distinct channel and
+	// fires at most once here, the order across events cannot change any
+	// channel's observable tick count, so a simple single pass is deterministic.
+	for _, ev := range s.events {
+		if ev.stopped || ev.at.After(target) {
+			continue
 		}
-		if idx == -1 {
-			s.now = target
-			break
-		}
-
-		ev := s.events[idx]
-		s.now = ev.at
 		fire := ev.at
 		if ev.period > 0 {
-			ev.at = ev.at.Add(ev.period)
+			// Skip whole periods already crossed so the tick carries the most
+			// recent boundary and the next fire lands strictly after target.
+			skipped := target.Sub(ev.at) / ev.period
+			fire = ev.at.Add(skipped * ev.period)
+			ev.at = fire.Add(ev.period)
 		} else {
-			s.events = append(s.events[:idx], s.events[idx+1:]...)
+			ev.stopped = true // one-shot: delivered once, dropped by compact
 		}
 		// Non-blocking send: mirror time.Ticker's drop-on-full semantics so
 		// Advance never blocks on a slow consumer.
@@ -108,6 +117,7 @@ func (s *Simulated) Advance(d time.Duration) {
 		default:
 		}
 	}
+	s.now = target
 	s.compact()
 }
 

@@ -28,7 +28,10 @@ func Real() Clock { return realClock{} }
 
 type realClock struct{}
 
-func (realClock) Now() time.Time                         { return time.Now() }
+// Now returns the wall-clock time in UTC. Everything the robot stores or
+// compares is UTC (DESIGN §3), so the clock normalizes here rather than leaving
+// an offset-bearing location for callers to strip.
+func (realClock) Now() time.Time                         { return time.Now().UTC() }
 func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
 func (realClock) NewTicker(d time.Duration) Ticker       { return &realTicker{t: time.NewTicker(d)} }
 
