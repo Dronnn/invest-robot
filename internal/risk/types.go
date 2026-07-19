@@ -20,14 +20,19 @@ type Position struct {
 // one instrument, carried over from earlier cycles that haven't reached a
 // terminal state yet.
 //
-// Only BuyLots is used to value exposure (rules 5-6): a pending buy commits
-// capital that hasn't landed yet, so counting it prevents the same capital
-// being committed twice across cycles before the first order fills.
-// SellLots is recorded for completeness and for future checks (e.g.
-// oversell prevention) but deliberately does not offset any limit here — a
-// pending sell is not a confirmed reduction of exposure until it fills, and
-// letting it net down a limit would let this cycle's effective budget widen
-// based on an order that might not fill, which DESIGN.md §8 rules out.
+// BuyLots values exposure (rules 5-6) and reserves cash (rule 7): a pending
+// buy commits capital that hasn't landed yet, so counting it prevents the same
+// capital being committed twice across cycles before the first order fills. It
+// deliberately never nets *down* an exposure or cash limit — a pending buy
+// only ever adds commitment, never headroom.
+//
+// SellLots backs the oversell rule: lots already resting to sell are
+// subtracted from the position when sizing new sells, so total pending sells
+// can never exceed what is held (Phase 1 forbids shorting). It too only ever
+// reduces sellable quantity; it never offsets a buy-side limit, since a
+// pending sell is not a confirmed reduction of exposure until it fills and
+// letting it widen a buy budget would lean on an order that might not fill,
+// which DESIGN.md §8 rules out.
 type PendingIntents struct {
 	BuyLots  int64
 	SellLots int64
@@ -100,6 +105,7 @@ const (
 	RuleMaxPositionNotional Rule = "max_position_notional"
 	RuleMaxTotalExposure    Rule = "max_total_exposure"
 	RuleCashFloor           Rule = "cash_floor"
+	RuleOversell            Rule = "oversell"
 )
 
 // Adjustment is an audit record of one modification Check made to a

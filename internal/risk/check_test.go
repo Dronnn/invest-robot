@@ -109,8 +109,10 @@ func adjustmentFor(res Result, index int) []Adjustment {
 // --- pass-through --------------------------------------------------------
 
 func TestCheck_PassThroughWhenNothingBinds(t *testing.T) {
+	state := wideOpenState()
+	state.Positions[uidB] = Position{QtyLots: 100, LastPrice: model.MustDecimal("50")} // backs the sell
 	actions := []model.Decision{buy(uidA, 5), sell(uidB, 3), hold(uidC), closeAction(uidB, 2)}
-	res := Check(actions, wideOpenState(), wideOpenLimits())
+	res := Check(actions, state, wideOpenLimits())
 
 	if res.Halted {
 		t.Fatalf("Halted = true, want false")
@@ -155,7 +157,8 @@ func TestKillSwitch(t *testing.T) {
 		limits := wideOpenLimits()
 		limits.MaxDailyLoss = "5000"
 		state := wideOpenState()
-		state.DayPnL = model.MustDecimal("-5000") // exactly at the limit: >=
+		state.DayPnL = model.MustDecimal("-5000")                                          // exactly at the limit: >=
+		state.Positions[uidB] = Position{QtyLots: 100, LastPrice: model.MustDecimal("50")} // backs the sell exit
 
 		actions := []model.Decision{buy(uidA, 1), sell(uidB, 1), hold(uidC), closeAction(uidB, 1)}
 		res := Check(actions, state, limits)
@@ -249,8 +252,10 @@ func TestAllowlist(t *testing.T) {
 	t.Run("sell and close always pass regardless of allowlist", func(t *testing.T) {
 		limits := wideOpenLimits()
 		limits.Allowlist = []string{string(uidC)} // neither A nor B
+		state := wideOpenState()
+		state.Positions[uidA] = Position{QtyLots: 100, LastPrice: model.MustDecimal("100")} // backs the sell exit
 		actions := []model.Decision{sell(uidA, 1), closeAction(uidB, 1)}
-		res := Check(actions, wideOpenState(), limits)
+		res := Check(actions, state, limits)
 
 		if len(res.Adjustments) != 0 {
 			t.Fatalf("Adjustments = %+v, want none (exits always pass)", res.Adjustments)
@@ -267,8 +272,10 @@ func TestOrderCaps(t *testing.T) {
 	t.Run("per-cycle cap keeps the first N order-producing actions, hold uncounted", func(t *testing.T) {
 		limits := wideOpenLimits()
 		limits.MaxOrdersPerCycle = 2
+		state := wideOpenState()
+		state.Positions[uidB] = Position{QtyLots: 100, LastPrice: model.MustDecimal("50")} // backs the sell
 		actions := []model.Decision{buy(uidA, 1), hold(uidA), sell(uidB, 1), buy(uidC, 1)}
-		res := Check(actions, wideOpenState(), limits)
+		res := Check(actions, state, limits)
 
 		if _, ok := allowedQty(t, res.Allowed, uidA); !ok {
 			t.Errorf("first order (buy uidA) should be kept")
@@ -682,6 +689,114 @@ func TestCheck_OverflowingCandidateQuantityDoesNotBypassNotional(t *testing.T) {
 	}
 }
 
+// --- rule 7: cash reserved for pending buys ---------------------------------
+
+func TestCashFloor_ReservesPendingBuys(t *testing.T) {
+	t.Run("pending buy intents reserve cash before this cycle's buys", func(t *testing.T) {
+		limits := wideOpenLimits()
+		limits.CashFloor = "0"
+		state := wideOpenState()
+		state.Cash = model.MustDecimal("1000")
+		// 5 lots of uidA already resting to buy @ 100 => 500 reserved, 500 free.
+		state.OpenIntents[uidA] = PendingIntents{BuyLots: 5}
+		res := Check([]model.Decision{buy(uidA, 8)}, state, limits) // wants 800
+
+		q, ok := allowedQty(t, res.Allowed, uidA)
+		if !ok || q != 5 { // 500 free / 100 per lot
+			t.Fatalf("got qty=%d ok=%v, want shrunk to 5 (pending buys reserve 500)", q, ok)
+		}
+		adjs := adjustmentFor(res, 0)
+		if len(adjs) == 0 || adjs[len(adjs)-1].Rule != RuleCashFloor {
+			t.Fatalf("adjustments = %+v, want the final shrink tagged cash_floor", adjs)
+		}
+	})
+
+	t.Run("pending buys can consume the whole floor and strip a new buy", func(t *testing.T) {
+		limits := wideOpenLimits()
+		limits.CashFloor = "0"
+		state := wideOpenState()
+		state.Cash = model.MustDecimal("1000")
+		state.OpenIntents[uidA] = PendingIntents{BuyLots: 10} // 1000 reserved, nothing free
+		res := Check([]model.Decision{buy(uidA, 1)}, state, limits)
+
+		if _, ok := allowedQty(t, res.Allowed, uidA); ok {
+			t.Fatalf("buy should be stripped: pending buys already reserve the whole budget")
+		}
+	})
+
+	t.Run("an unpriceable pending buy forces the budget to zero", func(t *testing.T) {
+		limits := wideOpenLimits()
+		limits.CashFloor = "0"
+		state := wideOpenState()
+		state.Cash = model.MustDecimal("1000000")
+		// A pending buy on an instrument that cannot be priced (no mark, no quote).
+		state.OpenIntents[uidC] = PendingIntents{BuyLots: 5}
+		delete(state.Quotes, uidC)
+		res := Check([]model.Decision{buy(uidA, 1)}, state, limits)
+
+		if _, ok := allowedQty(t, res.Allowed, uidA); ok {
+			t.Fatalf("buy should be stripped: an unpriceable pending commitment forces a zero cash budget")
+		}
+	})
+}
+
+// --- rule 8: oversell -------------------------------------------------------
+
+func TestOversell(t *testing.T) {
+	t.Run("nets a sell against the position minus pending sells", func(t *testing.T) {
+		state := wideOpenState()
+		state.Positions[uidA] = Position{QtyLots: 10, LastPrice: model.MustDecimal("100")}
+		state.OpenIntents[uidA] = PendingIntents{SellLots: 8} // 8 already pending
+		res := Check([]model.Decision{sell(uidA, 5)}, state, wideOpenLimits())
+
+		q, ok := allowedQty(t, res.Allowed, uidA)
+		if !ok || q != 2 { // 10 held - 8 pending = 2 sellable
+			t.Fatalf("got qty=%d ok=%v, want shrunk to 2", q, ok)
+		}
+		adjs := adjustmentFor(res, 0)
+		if len(adjs) != 1 || adjs[0].Rule != RuleOversell || adjs[0].Adjusted == nil || adjs[0].Adjusted.Quantity != 2 {
+			t.Fatalf("adjustment = %+v, want a shrink to 2 tagged oversell", adjs)
+		}
+	})
+
+	t.Run("strips a sell with nothing left to sell", func(t *testing.T) {
+		state := wideOpenState()
+		state.Positions[uidA] = Position{QtyLots: 5, LastPrice: model.MustDecimal("100")}
+		state.OpenIntents[uidA] = PendingIntents{SellLots: 5} // fully committed already
+		res := Check([]model.Decision{sell(uidA, 1)}, state, wideOpenLimits())
+
+		if _, ok := allowedQty(t, res.Allowed, uidA); ok {
+			t.Fatalf("sell should be stripped: no lots left to sell net of pending sells")
+		}
+		adjs := adjustmentFor(res, 0)
+		if len(adjs) != 1 || adjs[0].Rule != RuleOversell || adjs[0].Adjusted != nil {
+			t.Fatalf("adjustment = %+v, want a strip tagged oversell", adjs)
+		}
+	})
+
+	t.Run("nets earlier same-cycle sells for the same instrument", func(t *testing.T) {
+		state := wideOpenState()
+		state.Positions[uidA] = Position{QtyLots: 10, LastPrice: model.MustDecimal("100")}
+		res := Check([]model.Decision{sell(uidA, 7), sell(uidA, 7)}, state, wideOpenLimits())
+
+		q0, _ := allowedQty2(res.Allowed, 0)
+		q1, ok1 := allowedQty2(res.Allowed, 1)
+		if q0 != 7 {
+			t.Fatalf("first sell qty = %d, want 7 (fits the 10-lot position)", q0)
+		}
+		if !ok1 || q1 != 3 { // 10 - 7 already committed = 3 left
+			t.Fatalf("second sell qty=%d ok=%v, want shrunk to 3", q1, ok1)
+		}
+	})
+
+	t.Run("a sell with no position at all is stripped", func(t *testing.T) {
+		res := Check([]model.Decision{sell(uidA, 1)}, wideOpenState(), wideOpenLimits())
+		if _, ok := allowedQty(t, res.Allowed, uidA); ok {
+			t.Fatalf("a sell with no position must be stripped")
+		}
+	})
+}
+
 // --- rule ordering interactions ---------------------------------------------
 
 func TestRuleOrdering_NotionalThenCashFloor(t *testing.T) {
@@ -733,6 +848,8 @@ func TestRuleOrdering_KillSwitchPrecedesAllowlist(t *testing.T) {
 func TestCheck_StableOrderingOfAllowed(t *testing.T) {
 	limits := wideOpenLimits()
 	limits.Allowlist = []string{string(uidA), string(uidC)} // uidB stripped
+	state := wideOpenState()
+	state.Positions[uidA] = Position{QtyLots: 100, LastPrice: model.MustDecimal("100")} // backs the sell
 	actions := []model.Decision{
 		buy(uidA, 1),
 		buy(uidB, 1), // stripped
@@ -740,7 +857,7 @@ func TestCheck_StableOrderingOfAllowed(t *testing.T) {
 		sell(uidA, 1),
 		buy(uidC, 1),
 	}
-	res := Check(actions, wideOpenState(), limits)
+	res := Check(actions, state, limits)
 
 	wantUIDs := []model.InstrumentUID{uidA, uidC, uidA, uidC}
 	if len(res.Allowed) != len(wantUIDs) {

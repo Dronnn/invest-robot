@@ -5,7 +5,7 @@ import (
 	"github.com/Dronnn/invest-robot/internal/model"
 )
 
-// Check evaluates actions against limits and state, applying the seven
+// Check evaluates actions against limits and state, applying the eight
 // rules documented in the package comment in order. Every rule after the
 // first sees the actions as the rules before it left them: a decision
 // stripped by one rule is invisible to every rule that follows, and a
@@ -36,6 +36,8 @@ func Check(actions []model.Decision, state State, limits config.RiskConfig) Resu
 
 	cashFloor := parseLimitOrZero(limits.CashFloor)
 	applyCashFloor(entries, state, cashFloor, &adjustments)
+
+	applyOversell(entries, state, &adjustments)
 
 	allowed := make([]model.Decision, 0, len(entries))
 	for _, e := range entries {
@@ -279,6 +281,35 @@ func applyPositionNotional(entries []*entry, state State, maxPositionNotional mo
 	}
 }
 
+// applyOversell prevents selling more than is held net of commitments (Phase 1
+// forbids shorting). Walking live sells in action order, each sell's sellable
+// quantity is the position minus lots already resting to sell (OpenIntents.
+// SellLots) minus sells already committed earlier in this same cycle for the
+// instrument. A sell beyond that is shrunk to fit; a sell with nothing left to
+// sell is stripped. Close actions are not sized here — they carry no quantity
+// and are resolved to a concrete sell upstream (DESIGN §3) — so only ActionSell
+// is netted.
+func applyOversell(entries []*entry, state State, adjustments *[]Adjustment) {
+	committed := make(map[model.InstrumentUID]int64)
+	for _, e := range entries {
+		if !e.live || e.dec.Action != model.ActionSell {
+			continue
+		}
+		uid := e.dec.InstrumentUID
+		available := state.Positions[uid].QtyLots - state.OpenIntents[uid].SellLots - committed[uid]
+		if available <= 0 {
+			strip(e, RuleOversell, "no lots available to sell for "+string(uid)+" net of pending sells", adjustments)
+			continue
+		}
+		if e.dec.Quantity > available {
+			shrink(e, available, RuleOversell, "shrunk to the position net of pending sells for "+string(uid), adjustments)
+			committed[uid] += available
+			continue
+		}
+		committed[uid] += e.dec.Quantity
+	}
+}
+
 // existingExposure returns the combined notional of an instrument's
 // existing position and pending buy intents, or ok=false if either has a
 // non-zero quantity that cannot be priced.
@@ -425,9 +456,24 @@ func applyTotalExposure(entries []*entry, state State, maxTotalExposure model.De
 // (limit orders cost their limit price, uncushioned) plus a fee buffer —
 // and shrinks or strips (whole lots, floor) so cash minus the running
 // committed cost never drops below cashFloor.
+//
+// Cash already committed to resting buy intents from earlier cycles is
+// reserved up front: their conservative cost is subtracted from the budget
+// before this cycle's buys are sized, so a new buy can never spend cash a
+// pending buy is already going to consume and drive the account below the
+// floor once both settle. If any pending buy cannot be valued, the whole
+// budget is forced to zero (fail closed) rather than understating the
+// commitment, mirroring rule 6's treatment of an unpriceable baseline.
 func applyCashFloor(entries []*entry, state State, cashFloor model.Decimal, adjustments *[]Adjustment) {
 	budget, err := state.Cash.Sub(cashFloor)
 	if err != nil {
+		budget = model.Decimal{}
+	}
+	if reserved, ok := reservedPendingBuyCost(state); !ok {
+		budget = model.Decimal{}
+	} else if v, err := budget.Sub(reserved); err == nil {
+		budget = v
+	} else {
 		budget = model.Decimal{}
 	}
 
@@ -491,4 +537,58 @@ func applyCashFloor(entries []*entry, state State, cashFloor model.Decimal, adju
 			}
 		}
 	}
+}
+
+// reservedPendingBuyCost is the conservative cash the account has already
+// committed to resting buy intents across every instrument: for each pending
+// buy, its lots valued at the instrument's exposure price, padded with the
+// same market-slippage and fee buffers a fresh market buy is costed with (a
+// pending buy's order type is not carried in State, so the cushioned estimate
+// is used unconditionally — it can only over-reserve, never under-reserve).
+// ok is false if any pending buy cannot be valued, so the caller can force the
+// cash budget to zero rather than let an unpriceable commitment silently drop
+// out of the floor.
+func reservedPendingBuyCost(state State) (model.Decimal, bool) {
+	total := model.Decimal{}
+	for uid, pend := range state.OpenIntents {
+		if pend.BuyLots <= 0 {
+			continue
+		}
+		instr, hasInstr := state.Instruments[uid]
+		if !hasInstr {
+			return model.Decimal{}, false
+		}
+		price, hasPrice := exposurePrice(uid, state)
+		if !hasPrice {
+			return model.Decimal{}, false
+		}
+		effectivePrice := price
+		if state.SlippageBufferBps != 0 {
+			p, err := price.MulBps(10000 + state.SlippageBufferBps)
+			if err != nil {
+				return model.Decimal{}, false
+			}
+			effectivePrice = p
+		}
+		n, ok := notionalOf(pend.BuyLots, instr.Lot, effectivePrice)
+		if !ok {
+			return model.Decimal{}, false
+		}
+		if state.FeeBufferBps != 0 {
+			fee, err := n.MulBps(state.FeeBufferBps)
+			if err != nil {
+				return model.Decimal{}, false
+			}
+			n, err = n.Add(fee)
+			if err != nil {
+				return model.Decimal{}, false
+			}
+		}
+		v, err := total.Add(n)
+		if err != nil {
+			return model.Decimal{}, false
+		}
+		total = v
+	}
+	return total, true
 }

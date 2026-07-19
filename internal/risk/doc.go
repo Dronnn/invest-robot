@@ -11,7 +11,7 @@
 // result would overflow model.Decimal — is treated conservatively: the
 // action is stripped, never passed through on an optimistic default.
 //
-// Check evaluates seven rules in a fixed order, each seeing the result of
+// Check evaluates eight rules in a fixed order, each seeing the result of
 // every rule before it:
 //
 //  1. daily-loss kill switch — halts the cycle and strips every action that
@@ -26,11 +26,14 @@
 //  6. total exposure — shrinks or strips buys, across all instruments, so
 //     the portfolio-wide notional stays within the total limit
 //  7. cash floor — shrinks or strips buys so estimated cash after cost
-//     (plus a slippage and fee buffer) never drops below the floor
+//     (plus a slippage and fee buffer), net of cash already reserved for
+//     resting buy intents, never drops below the floor
+//  8. oversell — shrinks or strips sells so total pending sells never exceed
+//     the position (Phase 1 forbids shorting)
 //
 // Every modification — a full strip or a lot-quantity shrink — is recorded
 // as an Adjustment naming the rule that caused it; there is no silent
-// mutation. hold actions are never touched by rules 2-7 (they carry no risk
+// mutation. hold actions are never touched by rules 2-8 (they carry no risk
 // by themselves) and pass through unchanged unless the kill switch is
 // engaged, in which case only sell/close survive.
 package risk
