@@ -35,16 +35,25 @@ type StreamRequest struct {
 // supervisor gives up. Call Close (or cancel the context passed to
 // StreamMarketdata) to shut it down; Close blocks until the child is reaped and
 // the channel is closed.
+//
+// Two goroutines cooperate: the supervisor produces events by enqueuing them on
+// an internal, coalescing queue, and a delivery pump is the sole writer to (and
+// closer of) the events channel. Decoupling delivery from production means a
+// pending event is delivered as soon as a slow consumer frees capacity — never
+// stranded until the next producer event — and lets the pump drain the queue
+// (including any gap) before the terminal StreamDownError.
 type Stream struct {
 	client    *Client
 	events    chan Event
 	cancel    context.CancelFunc
 	done      chan struct{}
 	closeOnce sync.Once
+	wake      chan struct{} // buffered(1): signals the pump that the queue changed
 
 	mu             sync.Mutex
-	pendingPrices  map[model.InstrumentUID]*LastPriceEvent
-	pendingGap     *GapEvent
+	queue          []Event // FIFO delivery queue drained by the pump
+	finished       bool    // set once when the supervisor has stopped producing
+	terminal       *StreamDownError
 	lastCandleTime time.Time
 }
 
@@ -74,12 +83,13 @@ func (c *Client) StreamMarketdata(ctx context.Context, req StreamRequest) (*Stre
 	}
 	sctx, cancel := context.WithCancel(ctx)
 	s := &Stream{
-		client:        c,
-		events:        make(chan Event, c.cfg.StreamQueueSize),
-		cancel:        cancel,
-		done:          make(chan struct{}),
-		pendingPrices: map[model.InstrumentUID]*LastPriceEvent{},
+		client: c,
+		events: make(chan Event, c.cfg.StreamQueueSize),
+		cancel: cancel,
+		done:   make(chan struct{}),
+		wake:   make(chan struct{}, 1),
 	}
+	go s.pump(sctx)
 	go s.supervise(sctx, c.streamArgv(req))
 	return s, nil
 }
@@ -118,16 +128,18 @@ func (c *Client) streamArgv(req StreamRequest) []string {
 // supervise runs the child, restarting it on unexpected exit with jittered
 // backoff and a circuit breaker, until shutdown is requested or a
 // non-restartable outcome is reached. The child reconnects internally, so only
-// process exit is supervised (DESIGN §4).
+// process exit is supervised (DESIGN §4). It produces events onto the queue and
+// records the terminal outcome via finish; the pump does the actual delivery
+// and closes the channel.
 func (s *Stream) supervise(ctx context.Context, argv []string) {
-	defer close(s.done)
-	defer close(s.events)
+	// A clean or backoff-cancel exit finishes with no terminal event; finish is
+	// set-once, so an earlier terminal finish below takes precedence.
+	defer s.finish(nil)
 
 	consecutiveFast := 0
 	attempts := 0
 	for {
 		if ctx.Err() != nil {
-			s.flushPending()
 			return
 		}
 
@@ -137,12 +149,10 @@ func (s *Stream) supervise(ctx context.Context, argv []string) {
 
 		switch {
 		case clean:
-			s.flushPending()
 			return
 		case terminal != nil:
 			// Auth / usage / schema / protocol: never restart-loop (DESIGN §4).
-			s.flushPending()
-			s.sendTerminal(ctx, &StreamDownError{Err: terminal, Attempts: attempts})
+			s.finish(&StreamDownError{Err: terminal, Attempts: attempts})
 			return
 		}
 
@@ -156,8 +166,7 @@ func (s *Stream) supervise(ctx context.Context, argv []string) {
 			consecutiveFast = 0
 		}
 		if consecutiveFast >= s.client.cfg.StreamMaxFastRestarts {
-			s.flushPending()
-			s.sendTerminal(ctx, &StreamDownError{
+			s.finish(&StreamDownError{
 				Err:            fmt.Errorf("stream restarted %d times without staying up", consecutiveFast),
 				Attempts:       attempts,
 				CircuitTripped: true,
@@ -165,7 +174,6 @@ func (s *Stream) supervise(ctx context.Context, argv []string) {
 			return
 		}
 		if !s.sleepBackoff(ctx, consecutiveFast) {
-			s.flushPending()
 			return
 		}
 	}
@@ -376,86 +384,162 @@ func errForCode(be BrokerError) error {
 	}
 }
 
-// --- delivery: bounded queue, last-price coalescing, candles never lost ---
+// --- delivery: a coalescing queue drained by the pump ---
+
+// pump is the sole writer to (and closer of) the events channel. It delivers
+// queued events in order, blocking on a slow consumer so nothing is stranded
+// when the feed goes quiet, and drains the whole queue before the terminal
+// StreamDownError. A shutdown (ctx cancel) abandons any still-undelivered
+// events — the consumer asked to stop.
+func (s *Stream) pump(ctx context.Context) {
+	defer close(s.done)
+	defer close(s.events)
+	for {
+		s.mu.Lock()
+		var ev Event
+		if len(s.queue) > 0 {
+			ev = s.queue[0]
+			s.queue = s.queue[1:]
+			if len(s.queue) == 0 {
+				s.queue = nil // let the backing array be collected
+			}
+		}
+		finished := s.finished
+		term := s.terminal
+		s.mu.Unlock()
+
+		if ev != nil {
+			select {
+			case s.events <- ev:
+			case <-ctx.Done():
+				return
+			}
+			continue
+		}
+		if finished {
+			// The queue is drained; deliver the terminal event last, if any.
+			if term != nil {
+				select {
+				case s.events <- term:
+				case <-ctx.Done():
+				}
+			}
+			return
+		}
+		// Nothing to send and still producing: wait for the next producer event
+		// or shutdown.
+		select {
+		case <-s.wake:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// signal wakes the pump without blocking; the buffered channel coalesces bursts.
+func (s *Stream) signal() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+// finish records the supervisor's terminal outcome exactly once (a later call
+// is a no-op) and wakes the pump to drain and close.
+func (s *Stream) finish(term *StreamDownError) {
+	s.mu.Lock()
+	if !s.finished {
+		s.finished = true
+		s.terminal = term
+	}
+	s.mu.Unlock()
+	s.signal()
+}
 
 func (s *Stream) deliverCandle(ev CandleEvent) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if ev.CandleTime.After(s.lastCandleTime) {
 		s.lastCandleTime = ev.CandleTime
 	}
-	s.flushPendingLocked()
-	if !s.trySendLocked(ev) {
+	if len(s.queue) >= s.client.cfg.StreamQueueSize {
 		// A candle is never silently dropped: record it as a gap to backfill.
-		s.mergeGapLocked(ev.CandleTime, "candle dropped: queue full")
+		s.mergeGapLocked(GapEvent{From: ev.CandleTime, Reason: "candle dropped: queue full"})
+	} else {
+		s.queue = append(s.queue, ev)
 	}
+	s.mu.Unlock()
+	s.signal()
 }
 
 func (s *Stream) deliverLastPrice(ev LastPriceEvent) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.flushPendingLocked()
-	if !s.trySendLocked(ev) {
-		// Last prices are replaceable: keep only the latest per instrument.
-		e := ev
-		s.pendingPrices[model.InstrumentUID(ev.InstrumentUID)] = &e
+	// Last prices are replaceable: coalesce to the latest per instrument by
+	// replacing any still-queued price for the same instrument in place.
+	if !s.replaceLastPriceLocked(ev) && len(s.queue) < s.client.cfg.StreamQueueSize {
+		s.queue = append(s.queue, ev)
 	}
+	s.mu.Unlock()
+	s.signal()
 }
 
 func (s *Stream) deliverStatus(ev StatusEvent) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.flushPendingLocked()
-	_ = s.trySendLocked(ev) // informational; drop if the queue is full
+	if len(s.queue) < s.client.cfg.StreamQueueSize {
+		s.queue = append(s.queue, ev) // informational; drop if the queue is full
+	}
+	s.mu.Unlock()
+	s.signal()
 }
 
 func (s *Stream) deliverGap(ev GapEvent) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.mergeGapLocked(ev.From, ev.Reason)
-	s.flushPendingLocked()
+	s.mergeGapLocked(ev)
+	s.mu.Unlock()
+	s.signal()
 }
 
-func (s *Stream) flushPending() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.flushPendingLocked()
+// replaceLastPriceLocked replaces a still-queued last price for ev's instrument
+// with ev, returning true when it coalesced.
+func (s *Stream) replaceLastPriceLocked(ev LastPriceEvent) bool {
+	for i := len(s.queue) - 1; i >= 0; i-- {
+		if p, ok := s.queue[i].(LastPriceEvent); ok && p.InstrumentUID == ev.InstrumentUID {
+			s.queue[i] = ev
+			return true
+		}
+	}
+	return false
 }
 
-// flushPendingLocked opportunistically drains the coalesced gap and last prices
-// into the channel while there is room, preserving order (gap first).
-func (s *Stream) flushPendingLocked() {
-	if s.pendingGap != nil {
-		if !s.trySendLocked(*s.pendingGap) {
+// mergeGapLocked coalesces ev into a still-queued gap for the same instrument
+// (widening the range), else appends it. Gaps are always kept even at capacity:
+// there is at most one per instrument plus one whole-subscription gap.
+func (s *Stream) mergeGapLocked(ev GapEvent) {
+	for i := range s.queue {
+		if g, ok := s.queue[i].(GapEvent); ok && g.InstrumentUID == ev.InstrumentUID {
+			s.queue[i] = mergeGap(g, ev)
 			return
 		}
-		s.pendingGap = nil
 	}
-	for uid, p := range s.pendingPrices {
-		if !s.trySendLocked(*p) {
-			return
-		}
-		delete(s.pendingPrices, uid)
-	}
+	s.queue = append(s.queue, ev)
 }
 
-func (s *Stream) trySendLocked(ev Event) bool {
-	select {
-	case s.events <- ev:
-		return true
-	default:
-		return false
+// mergeGap widens dst to also cover ev. A zero From/To is open-ended and
+// dominates (start-of-history / up-to-now); otherwise the widest range wins.
+func mergeGap(dst, ev GapEvent) GapEvent {
+	if ev.From.IsZero() {
+		dst.From = time.Time{}
+	} else if !dst.From.IsZero() && ev.From.Before(dst.From) {
+		dst.From = ev.From
 	}
-}
-
-func (s *Stream) mergeGapLocked(from time.Time, reason string) {
-	if s.pendingGap == nil {
-		s.pendingGap = &GapEvent{From: from, Reason: reason}
-		return
+	if ev.To.IsZero() {
+		dst.To = time.Time{}
+	} else if !dst.To.IsZero() && ev.To.After(dst.To) {
+		dst.To = ev.To
 	}
-	if s.pendingGap.From.IsZero() || from.Before(s.pendingGap.From) {
-		s.pendingGap.From = from
+	if dst.Reason == "" {
+		dst.Reason = ev.Reason
 	}
+	return dst
 }
 
 // gapFrom returns the earliest point a gap should start from: the last observed
@@ -467,15 +551,6 @@ func (s *Stream) gapFrom(fallback time.Time) time.Time {
 		return fallback.UTC()
 	}
 	return s.lastCandleTime
-}
-
-// sendTerminal delivers the final StreamDownError, giving up if shutdown is
-// requested first so the goroutine never blocks on a stopped consumer.
-func (s *Stream) sendTerminal(ctx context.Context, e *StreamDownError) {
-	select {
-	case s.events <- e:
-	case <-ctx.Done():
-	}
 }
 
 // sleepBackoff waits a jittered exponential backoff, returning false if the

@@ -310,6 +310,118 @@ func TestStreamAuthFailureNoRestart(t *testing.T) {
 	}
 }
 
+// TestStreamPumpDeliversWhenConsumerFreesCapacity proves the delivery pump
+// hands a pending event to the consumer as soon as capacity frees, even while
+// the feed is quiet — the old flush-on-next-producer-event path stranded it.
+// The queue is capped at 1 so the last price waits behind the connected frame;
+// the next producer frame (a candle) is 3s away, so a prompt delivery can only
+// come from the pump reacting to freed capacity.
+func TestStreamPumpDeliversWhenConsumerFreesCapacity(t *testing.T) {
+	script := `[
+	  {"type":"connected","time":"2026-07-19T10:00:00Z","data":{"attempt":1,"subscriptions":1}},
+	  {"type":"last_price","time":"2026-07-19T10:00:01Z","data":{"instrument_uid":"` + sberUID + `","price":{"value":"270.8"},"time":"2026-07-19T10:00:01Z"}},
+	  {"type":"candle","time":"2026-07-19T10:00:05Z","delay_ms":3000,"data":{
+	     "instrument_uid":"` + sberUID + `","interval":"SUBSCRIPTION_INTERVAL_FIVE_MINUTES",
+	     "open":{"value":"1"},"high":{"value":"1"},"low":{"value":"1"},"close":{"value":"1"},
+	     "volume":"1","candle_time":"2026-07-19T10:00:00Z"}}
+	]`
+	dir := writeScenario(t, map[string]string{
+		"scenario.toml": "account_id = \"test-pump\"\n[stream]\nscript = \"stream.json\"\n",
+		"stream.json":   script,
+	})
+	c := newClient(t, dir, t.TempDir(), func(cfg *Config) {
+		streamFast(cfg)
+		cfg.StreamQueueSize = 1 // force the price to wait behind connected
+	})
+	s, err := c.StreamMarketdata(context.Background(), StreamRequest{
+		Instruments: []string{sberUID}, LastPrice: true, Candles: true, CandleInterval: model.Interval5m,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	first := <-s.Events() // read connected, freeing channel capacity
+	if st, ok := first.(StatusEvent); !ok || st.Kind != StatusConnected {
+		t.Fatalf("first event = %T %+v, want connected", first, first)
+	}
+	select {
+	case ev := <-s.Events():
+		if _, ok := ev.(LastPriceEvent); !ok {
+			t.Fatalf("second event = %T, want the pending LastPriceEvent", ev)
+		}
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("pending last price was stranded: not delivered on freed capacity while the feed was quiet")
+	}
+}
+
+// TestStreamPumpDrainsGapBeforeTerminal proves a pending gap is delivered before
+// the terminal StreamDownError even under backpressure and a slow consumer.
+func TestStreamPumpDrainsGapBeforeTerminal(t *testing.T) {
+	script := `[
+	  {"type":"connected","time":"2026-07-19T10:00:00Z","data":{"attempt":1,"subscriptions":1}},
+	  {"type":"disconnected","time":"2026-07-19T10:00:01Z","data":{"reason":"network","final":false}},
+	  {"type":"error","time":"2026-07-19T10:00:02Z","error":{"code":"AUTH","message":"token rejected","retryable":false}},
+	  {"exit":3}
+	]`
+	dir := writeScenario(t, map[string]string{
+		"scenario.toml": "account_id = \"test-drain\"\n[stream]\nscript = \"stream.json\"\n",
+		"stream.json":   script,
+	})
+	c := newClient(t, dir, t.TempDir(), func(cfg *Config) {
+		streamFast(cfg)
+		cfg.StreamQueueSize = 1 // backpressure so the gap cannot ride along for free
+		cfg.StreamMaxFastRestarts = 10
+	})
+	s, err := c.StreamMarketdata(context.Background(), StreamRequest{Instruments: []string{sberUID}, Candles: true, CandleInterval: model.Interval5m})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// A deliberately slow consumer: sleep between reads so the pump must hold
+	// pending events rather than dumping them into a roomy buffer.
+	var got []Event
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case ev, ok := <-s.Events():
+			if !ok {
+				goto done
+			}
+			got = append(got, ev)
+			time.Sleep(15 * time.Millisecond)
+		case <-deadline:
+			t.Fatalf("slow-consumer read timed out with %d events: %s", len(got), kinds(got))
+		}
+	}
+done:
+	if len(got) == 0 {
+		t.Fatal("no events")
+	}
+	last := got[len(got)-1]
+	down, ok := last.(*StreamDownError)
+	if !ok {
+		t.Fatalf("last event should be *StreamDownError, got %T (%s)", last, kinds(got))
+	}
+	var ae *AuthError
+	if !errors.As(down.Err, &ae) {
+		t.Fatalf("terminal cause = %T, want *AuthError", down.Err)
+	}
+	gapIdx := -1
+	for i, e := range got {
+		if _, ok := e.(GapEvent); ok {
+			gapIdx = i
+		}
+	}
+	if gapIdx == -1 {
+		t.Fatalf("expected a GapEvent before the terminal, got: %s", kinds(got))
+	}
+	if gapIdx >= len(got)-1 {
+		t.Fatalf("gap must drain before the terminal event, kinds: %s", kinds(got))
+	}
+}
+
 func TestStreamCleanShutdownViaClose(t *testing.T) {
 	before := runtime.NumGoroutine()
 	c := newClient(t, shippedScenario(t, "happy"), t.TempDir(), streamFast)
