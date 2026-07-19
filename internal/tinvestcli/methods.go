@@ -219,14 +219,20 @@ func (c *Client) OrdersPlace(ctx context.Context, req PlaceRequest) (Order, erro
 	return decodeOrder(raw)
 }
 
-// OrdersGet fetches one order by its exchange order id.
-func (c *Client) OrdersGet(ctx context.Context, account, orderID string) (Order, error) {
+// OrdersGet fetches one order's full state by its exchange order id.
+func (c *Client) OrdersGet(ctx context.Context, account, orderID string) (OrderState, error) {
 	argv := append(accountArgv("orders", "get", account), orderID)
 	raw, _, err := c.call(ctx, callSpec{grp: groupOrders, argv: argv, timeout: c.cfg.Timeout, read: true})
 	if err != nil {
-		return Order{}, err
+		return OrderState{}, err
 	}
-	return decodeOrder(raw)
+	var w struct {
+		Order OrderState `json:"order"`
+	}
+	if err := decodeData(raw, &w); err != nil {
+		return OrderState{}, err
+	}
+	return w.Order, nil
 }
 
 // OrdersCancel cancels one order by id. It is a mutation and never retries.
@@ -243,14 +249,14 @@ func (c *Client) OrdersCancel(ctx context.Context, account, orderID string) (Can
 	return res, nil
 }
 
-// OrdersList returns the account's active orders.
-func (c *Client) OrdersList(ctx context.Context, account string) ([]Order, error) {
+// OrdersList returns the account's active orders as full states.
+func (c *Client) OrdersList(ctx context.Context, account string) ([]OrderState, error) {
 	raw, _, err := c.call(ctx, callSpec{grp: groupOrders, argv: accountArgv("orders", "list", account), timeout: c.cfg.Timeout, read: true})
 	if err != nil {
 		return nil, err
 	}
 	var w struct {
-		Orders []Order `json:"orders"`
+		Orders []OrderState `json:"orders"`
 	}
 	if err := decodeData(raw, &w); err != nil {
 		return nil, err

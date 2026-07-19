@@ -326,9 +326,11 @@ type Lots struct {
 	Remaining int64 `json:"remaining"`
 }
 
-// Order is the order view returned by `orders place`, `orders get`, and each row
-// of `orders list`. Money fields are pointers because the CLI omits them until
-// they are known.
+// Order is the placement result returned by `orders place`. It mirrors
+// render.PlaceResultView: at placement only the initial commission is known, so
+// Commission reads initial_commission (the order-state views report
+// executed_commission instead — see OrderState). Money fields are pointers
+// because the CLI omits them until they are known.
 type Order struct {
 	OrderID       string `json:"order_id"`
 	ClientOrderID string `json:"client_order_id"`
@@ -345,6 +347,28 @@ type Order struct {
 	Message       string `json:"message"`
 }
 
+// OrderState is one order's full state from `orders get` and each row of
+// `orders list`. It mirrors render.OrderStateView, which differs from the
+// placement view: it reports the realized executed_commission (not the initial
+// estimate), and carries the order's currency and order_date. Money fields are
+// pointers because the CLI omits them until they are known.
+type OrderState struct {
+	OrderID       string    `json:"order_id"`
+	ClientOrderID string    `json:"client_order_id"`
+	Lifecycle     string    `json:"lifecycle"`
+	Direction     string    `json:"direction"`
+	OrderType     string    `json:"order_type"`
+	Lots          Lots      `json:"lots"`
+	InstrumentUID string    `json:"instrument_uid"`
+	Ticker        string    `json:"ticker"`
+	Currency      string    `json:"currency"`
+	InitialPrice  *Money    `json:"initial_order_price"`
+	ExecutedPrice *Money    `json:"executed_order_price"`
+	TotalAmount   *Money    `json:"total_order_amount"`
+	Commission    *Money    `json:"executed_commission"`
+	OrderDate     time.Time `json:"order_date"`
+}
+
 // CancelResult is the `orders cancel` data.
 type CancelResult struct {
 	OrderID string     `json:"order_id"`
@@ -353,7 +377,9 @@ type CancelResult struct {
 }
 
 // ReconcileOutcome is one resolved (or still-unresolved) intent from
-// `orders reconcile`.
+// `orders reconcile`. It mirrors render.ReconcileOutcomeView: Error carries a
+// resolution failure and Note carries advisory context (e.g. that a match was
+// heuristic), both of which the caller must surface rather than drop.
 type ReconcileOutcome struct {
 	IntentID      string `json:"intent_id"`
 	ClientOrderID string `json:"client_order_id"`
@@ -361,6 +387,8 @@ type ReconcileOutcome struct {
 	Outcome       string `json:"outcome"`
 	OrderID       string `json:"order_id"`
 	Lifecycle     string `json:"lifecycle"`
+	Error         string `json:"error"`
+	Note          string `json:"note"`
 }
 
 // ReconcileResult is the `orders reconcile` data. UnresolvedCount > 0 is the
@@ -371,13 +399,19 @@ type ReconcileResult struct {
 	UnresolvedCount int                `json:"unresolved_count"`
 }
 
-// StopOrder is one row of `stop-orders list`. The Phase-1 robot only lists stop
-// orders, so the shape is kept permissive.
+// StopOrder is one row of `stop-orders list`. It mirrors render.StopOrderView,
+// whose lifecycle field is named status (a distinct enum from an order's
+// lifecycle); reading it as lifecycle silently drops the stop order's state.
+// The Phase-1 robot only lists stop orders, so extra renderer fields are left
+// undecoded.
 type StopOrder struct {
-	StopOrderID   string          `json:"stop_order_id"`
-	Direction     string          `json:"direction"`
-	Lifecycle     string          `json:"lifecycle"`
-	InstrumentUID string          `json:"instrument_uid"`
-	Ticker        string          `json:"ticker"`
-	Raw           json.RawMessage `json:"-"`
+	StopOrderID   string `json:"stop_order_id"`
+	Status        string `json:"status"`
+	Direction     string `json:"direction"`
+	StopOrderType string `json:"stop_order_type"`
+	InstrumentUID string `json:"instrument_uid"`
+	Ticker        string `json:"ticker"`
+	Currency      string `json:"currency"`
+	Price         *Money `json:"price"`
+	StopPrice     *Money `json:"stop_price"`
 }

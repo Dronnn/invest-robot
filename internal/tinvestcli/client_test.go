@@ -595,11 +595,69 @@ func TestReconcileUnresolvedExit1IsSuccess(t *testing.T) {
 	}
 }
 
+// TestReconcileCarriesErrorAndNote proves the adapter preserves the error and
+// note fields the real reconcile renderer emits, rather than dropping them.
+func TestReconcileCarriesErrorAndNote(t *testing.T) {
+	dir := writeScenario(t, map[string]string{
+		"scenario.toml": "account_id = \"test-reconcile\"\n[responses]\norders_reconcile = \"orders_reconcile.json\"\n",
+		"orders_reconcile.json": `{"outcomes":[{"intent_id":"i1","client_order_id":"` + orderUUID1 + `","account_id":"test-reconcile",` +
+			`"outcome":"placed","order_id":"ord-1","lifecycle":"EXECUTION_REPORT_STATUS_FILL",` +
+			`"error":"ledger write failed","note":"match is heuristic (no client-id correlation)"}],"unresolved_count":0}`,
+	})
+	c := newClient(t, dir, t.TempDir(), nil)
+	rec, err := c.OrdersReconcile(context.Background(), "test-reconcile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.Outcomes) != 1 {
+		t.Fatalf("want 1 outcome, got %d", len(rec.Outcomes))
+	}
+	o := rec.Outcomes[0]
+	if o.Error != "ledger write failed" {
+		t.Fatalf("error = %q, want the reconcile error surfaced", o.Error)
+	}
+	if o.Note != "match is heuristic (no client-id correlation)" {
+		t.Fatalf("note = %q, want the reconcile note surfaced", o.Note)
+	}
+}
+
+// TestStopOrdersStatusDecodes proves a stop order's state decodes from the
+// renderer's status field (not the order-lifecycle field an order uses).
+func TestStopOrdersStatusDecodes(t *testing.T) {
+	dir := writeScenario(t, map[string]string{
+		"scenario.toml": "account_id = \"test-stops\"\n[responses]\nstop_orders = \"stop_orders.json\"\n",
+		"stop_orders.json": `{"stop_orders":[{"stop_order_id":"so-1","status":"STOP_ORDER_STATUS_ACTIVE",` +
+			`"direction":"STOP_ORDER_DIRECTION_SELL","stop_order_type":"STOP_ORDER_TYPE_STOP_LOSS",` +
+			`"instrument_uid":"u1","ticker":"SBER","currency":"rub",` +
+			`"stop_price":{"units":"260","nano":0,"value":"260","currency":"rub"}}]}`,
+	})
+	c := newClient(t, dir, t.TempDir(), nil)
+	stops, err := c.StopOrdersList(context.Background(), "test-stops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stops) != 1 {
+		t.Fatalf("want 1 stop order, got %d", len(stops))
+	}
+	s := stops[0]
+	if s.Status != "STOP_ORDER_STATUS_ACTIVE" {
+		t.Fatalf("status = %q, want it decoded from the status field", s.Status)
+	}
+	if s.StopOrderType != "STOP_ORDER_TYPE_STOP_LOSS" {
+		t.Fatalf("stop_order_type = %q", s.StopOrderType)
+	}
+	eqMoney(t, s.StopPrice, "260", "rub")
+}
+
 func TestOrdersGetAndListDecode(t *testing.T) {
+	// A fetched order's full state reports executed_commission (not the
+	// placement view's initial_commission) plus currency and order_date.
 	order := `{"order_id":"ord-1","client_order_id":"` + orderUUID1 + `","lifecycle":"EXECUTION_REPORT_STATUS_FILL",` +
 		`"direction":"ORDER_DIRECTION_BUY","order_type":"ORDER_TYPE_LIMIT",` +
-		`"lots":{"requested":2,"executed":2,"remaining":0},"instrument_uid":"u1","ticker":"SBER",` +
-		`"executed_order_price":{"units":"270","nano":600000000,"value":"270.6","currency":"rub"}}`
+		`"lots":{"requested":2,"executed":2,"remaining":0},"instrument_uid":"u1","ticker":"SBER","currency":"rub",` +
+		`"executed_order_price":{"units":"270","nano":600000000,"value":"270.6","currency":"rub"},` +
+		`"executed_commission":{"units":"1","nano":350000000,"value":"1.35","currency":"rub"},` +
+		`"order_date":"2026-07-19T10:00:05Z"}`
 	dir := writeScenario(t, map[string]string{
 		"scenario.toml":    "account_id = \"test-orders\"\n[responses]\norders_get = \"orders_get.json\"\norders_list = \"orders_list.json\"\n",
 		"orders_get.json":  `{"order":` + order + `}`,
@@ -615,7 +673,14 @@ func TestOrdersGetAndListDecode(t *testing.T) {
 	if ord.OrderID != "ord-1" || ord.Lots != (Lots{Requested: 2, Executed: 2, Remaining: 0}) {
 		t.Fatalf("orders get: %+v", ord)
 	}
+	if ord.Currency != "rub" {
+		t.Fatalf("currency = %q, want rub", ord.Currency)
+	}
 	eqMoney(t, ord.ExecutedPrice, "270.6", "rub")
+	eqMoney(t, ord.Commission, "1.35", "rub") // executed_commission, not initial
+	if !ord.OrderDate.Equal(time.Date(2026, 7, 19, 10, 0, 5, 0, time.UTC)) {
+		t.Fatalf("order_date = %v", ord.OrderDate)
+	}
 
 	list, err := c.OrdersList(ctx, "test-orders")
 	if err != nil {
@@ -624,6 +689,7 @@ func TestOrdersGetAndListDecode(t *testing.T) {
 	if len(list) != 1 || list[0].OrderID != "ord-1" {
 		t.Fatalf("orders list: %+v", list)
 	}
+	eqMoney(t, list[0].Commission, "1.35", "rub")
 }
 
 // TestOperationsServiceSerialized proves portfolio and operations-list calls
