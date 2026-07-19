@@ -387,13 +387,13 @@ func TestStreamAuthFailureNoRestart(t *testing.T) {
 // hands a pending event to the consumer as soon as capacity frees, even while
 // the feed is quiet — the old flush-on-next-producer-event path stranded it.
 // The queue is capped at 1 so the last price waits behind the connected frame;
-// the next producer frame (a candle) is 3s away, so a prompt delivery can only
-// come from the pump reacting to freed capacity.
+// the next producer frame (a candle) is 8s away, so a prompt (<3s) delivery can
+// only come from the pump reacting to freed capacity, not from a later frame.
 func TestStreamPumpDeliversWhenConsumerFreesCapacity(t *testing.T) {
 	script := `[
 	  {"type":"connected","time":"2026-07-19T10:00:00Z","data":{"attempt":1,"subscriptions":1}},
 	  {"type":"last_price","time":"2026-07-19T10:00:01Z","data":{"instrument_uid":"` + sberUID + `","price":{"value":"270.8"},"time":"2026-07-19T10:00:01Z"}},
-	  {"type":"candle","time":"2026-07-19T10:00:05Z","delay_ms":3000,"data":{
+	  {"type":"candle","time":"2026-07-19T10:00:05Z","delay_ms":8000,"data":{
 	     "instrument_uid":"` + sberUID + `","interval":"SUBSCRIPTION_INTERVAL_FIVE_MINUTES",
 	     "open":{"value":"1"},"high":{"value":"1"},"low":{"value":"1"},"close":{"value":"1"},
 	     "volume":"1","candle_time":"2026-07-19T10:00:00Z"}}
@@ -418,12 +418,14 @@ func TestStreamPumpDeliversWhenConsumerFreesCapacity(t *testing.T) {
 	if st, ok := first.(StatusEvent); !ok || st.Kind != StatusConnected {
 		t.Fatalf("first event = %T %+v, want connected", first, first)
 	}
+	// Well under the 8s quiet gap but generous enough to absorb scheduling
+	// jitter when the whole suite runs in parallel.
 	select {
 	case ev := <-s.Events():
 		if _, ok := ev.(LastPriceEvent); !ok {
 			t.Fatalf("second event = %T, want the pending LastPriceEvent", ev)
 		}
-	case <-time.After(1500 * time.Millisecond):
+	case <-time.After(3 * time.Second):
 		t.Fatal("pending last price was stranded: not delivered on freed capacity while the feed was quiet")
 	}
 }
