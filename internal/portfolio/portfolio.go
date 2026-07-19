@@ -154,7 +154,10 @@ func (p *Portfolio) ApplyFill(ctx context.Context, q sqlite.Querier, fa FillAppl
 		pos = model.Position{InstrumentUID: fa.InstrumentUID}
 	}
 
-	shares := fa.Fill.Qty * fa.Lot
+	shares, ok := sharesFor(fa.Fill.Qty, fa.Lot)
+	if !ok {
+		return fmt.Errorf("portfolio: apply fill: shares overflow for %d lots of %d", fa.Fill.Qty, fa.Lot)
+	}
 	notional, err := fa.Fill.Price.MulInt(shares)
 	if err != nil {
 		return fmt.Errorf("portfolio: apply fill: notional overflow: %w", err)
@@ -273,4 +276,20 @@ func recomputeAvgPrice(existingAvg model.Decimal, existingQty int64, price model
 		return model.Decimal{}, fmt.Errorf("recompute avg price: division overflow: %w", err)
 	}
 	return avg, nil
+}
+
+// sharesFor returns qtyLots*lot as a positive share count, or ok=false when
+// either input is non-positive or the product overflows int64. Money math
+// multiplies lots by lot size before pricing, and a wrapped int64 product
+// would price a fill against a bogus share count; the overflow guard divides
+// the product back out and rejects any value that cannot recover the quantity.
+func sharesFor(qtyLots, lot int64) (int64, bool) {
+	if qtyLots <= 0 || lot <= 0 {
+		return 0, false
+	}
+	shares := qtyLots * lot
+	if shares/lot != qtyLots {
+		return 0, false
+	}
+	return shares, true
 }

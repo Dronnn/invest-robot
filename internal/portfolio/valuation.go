@@ -88,7 +88,11 @@ func (p *Portfolio) valuePositions(ctx context.Context, q sqlite.Querier, quotes
 			continue
 		}
 
-		shares := pos.Qty * lot
+		shares, ok := sharesFor(pos.Qty, lot)
+		if !ok {
+			missing = append(missing, pos.InstrumentUID)
+			continue
+		}
 		value, err := quote.Last.MulInt(shares)
 		if err != nil {
 			missing = append(missing, pos.InstrumentUID)
