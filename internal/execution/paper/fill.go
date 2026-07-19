@@ -72,6 +72,22 @@ func (s *Simulator) priceFill(side model.Side, typ model.OrderType, limit *model
 	}
 }
 
+// sharesFor returns lots*lot as a positive share count, or ok=false when
+// either input is non-positive or the product overflows int64. A wrapped
+// int64 product would price a fill's commission against a bogus share count;
+// the overflow guard divides the product back out and rejects a value that
+// cannot recover the lot count.
+func sharesFor(lots, lot int64) (int64, bool) {
+	if lots <= 0 || lot <= 0 {
+		return 0, false
+	}
+	shares := lots * lot
+	if shares/lot != lots {
+		return 0, false
+	}
+	return shares, true
+}
+
 // referenceBuy is the base price a buy prices off: the ask if known, else the
 // last price (low fidelity). have is false when neither is available.
 func referenceBuy(q model.Quote) (base model.Decimal, lowFidelity, have bool) {
@@ -120,7 +136,11 @@ func commission(price model.Decimal, lots, lot, rateNum, rateDen int64) (model.D
 	if rateNum == 0 {
 		return model.Decimal{}, nil
 	}
-	notional, err := price.MulInt(lots * lot)
+	shares, ok := sharesFor(lots, lot)
+	if !ok {
+		return model.Decimal{}, fmt.Errorf("paper: fill notional: shares overflow for %d lots of %d", lots, lot)
+	}
+	notional, err := price.MulInt(shares)
 	if err != nil {
 		return model.Decimal{}, fmt.Errorf("paper: fill notional: %w", err)
 	}
