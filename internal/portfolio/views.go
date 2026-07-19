@@ -52,12 +52,16 @@ func (p *Portfolio) Summary(ctx context.Context, q sqlite.Querier, quotes map[mo
 	return SummaryView{Cash: cash, Equity: equity, Positions: views}, nil
 }
 
-// DayPnLResult splits DayPnL into its realized and unrealized components,
-// plus their sum. Total is what feeds a single-figure consumer (e.g.
-// risk.State.DayPnL).
+// DayPnLResult splits DayPnL into its components. Realized is gross price PnL
+// (no fees); Unrealized is the pure mark-to-market movement of open positions;
+// Fees is the commission paid this session, reported on its own rather than
+// buried in Unrealized. Total is the net equity change and is what feeds a
+// single-figure consumer (e.g. risk.State.DayPnL) — it already nets the fees
+// out, so Total == Realized + Unrealized - Fees.
 type DayPnLResult struct {
 	Realized   model.Decimal
 	Unrealized model.Decimal
+	Fees       model.Decimal
 	Total      model.Decimal
 }
 
@@ -66,14 +70,17 @@ type DayPnLResult struct {
 //
 //	Total      = latestSnapshot.Total - sessionStartSnapshot.Total
 //	Realized   = sum of fills.realized_pnl for every fill with ts >= sessionStart
-//	Unrealized = Total - Realized
+//	Fees       = sum of fills.fee for every fill with ts >= sessionStart
+//	Unrealized = Total - Realized + Fees
 //
 // Unrealized is deliberately the algebraic residual rather than a direct
 // per-position computation: Total already captures every cash and
 // mark-to-market change since sessionStart (assuming no external cash flows
-// mid-session, which Phase 1 has none of — deposits only happen via Init),
-// so subtracting the realized component that's independently traceable in
-// the ledger leaves exactly the unrealized mark-to-market movement.
+// mid-session, which Phase 1 has none of — deposits only happen via Init).
+// Total includes the commissions paid, which are a real cash outflow but not a
+// mark-to-market movement, so they are added back after subtracting gross
+// realized PnL — otherwise a flat round-trip's fees would surface as a phantom
+// unrealized loss. The fees are reported on their own in Fees.
 //
 // DayPnL depends on an equity_snapshots row existing at or after
 // sessionStart; call EnsureSessionStartSnapshot once near the start of the
@@ -104,7 +111,7 @@ func (p *Portfolio) DayPnL(ctx context.Context, q sqlite.Querier, sessionStart t
 		return DayPnLResult{}, fmt.Errorf("portfolio: day pnl: total delta overflow: %w", err)
 	}
 
-	realized, err := p.realizedSince(ctx, q, sessionStart)
+	realized, fees, err := p.realizedAndFeesSince(ctx, q, sessionStart)
 	if err != nil {
 		return DayPnLResult{}, err
 	}
@@ -113,35 +120,46 @@ func (p *Portfolio) DayPnL(ctx context.Context, q sqlite.Querier, sessionStart t
 	if err != nil {
 		return DayPnLResult{}, fmt.Errorf("portfolio: day pnl: unrealized residual overflow: %w", err)
 	}
+	unrealized, err = unrealized.Add(fees)
+	if err != nil {
+		return DayPnLResult{}, fmt.Errorf("portfolio: day pnl: unrealized residual overflow: %w", err)
+	}
 
-	return DayPnLResult{Realized: realized, Unrealized: unrealized, Total: total}, nil
+	return DayPnLResult{Realized: realized, Unrealized: unrealized, Fees: fees, Total: total}, nil
 }
 
-// realizedSince sums fills.realized_pnl across every fill with ts >=
-// sessionStart (a buy fill's realized_pnl is always nil and contributes
-// nothing). FillRepo exposes no time-ranged read narrower than "every fill",
-// so this walks the full table via Recent(ctx, q, -1) — a negative limit is
-// SQLite's documented "no upper bound" — and filters/sums in Go. Acceptable
-// at this project's scale (a personal trading robot's fills table is not
-// going to reach a size where this is a bottleneck); if it ever became one,
-// FillRepo would need a since-timestamp query.
-func (p *Portfolio) realizedSince(ctx context.Context, q sqlite.Querier, sessionStart time.Time) (model.Decimal, error) {
+// realizedAndFeesSince sums, across every fill with ts >= sessionStart, both
+// fills.realized_pnl (gross price PnL; nil on a buy fill, contributing nothing)
+// and fills.fee (the commission on every fill, buy or sell). FillRepo exposes
+// no time-ranged read narrower than "every fill", so this walks the full table
+// via Recent(ctx, q, -1) — a negative limit is SQLite's documented "no upper
+// bound" — and filters/sums in Go. Acceptable at this project's scale (a
+// personal trading robot's fills table is not going to reach a size where this
+// is a bottleneck); if it ever became one, FillRepo would need a
+// since-timestamp query.
+func (p *Portfolio) realizedAndFeesSince(ctx context.Context, q sqlite.Querier, sessionStart time.Time) (realized, fees model.Decimal, err error) {
 	fills, err := (sqlite.FillRepo{}).Recent(ctx, q, -1)
 	if err != nil {
-		return model.Decimal{}, fmt.Errorf("portfolio: day pnl: recent fills: %w", err)
+		return model.Decimal{}, model.Decimal{}, fmt.Errorf("portfolio: day pnl: recent fills: %w", err)
 	}
-	var sum model.Decimal
 	for _, f := range fills {
-		if f.RealizedPnL == nil || f.TS.Before(sessionStart) {
+		if f.TS.Before(sessionStart) {
 			continue
 		}
-		v, err := sum.Add(*f.RealizedPnL)
-		if err != nil {
-			return model.Decimal{}, fmt.Errorf("portfolio: day pnl: realized sum overflow: %w", err)
+		if f.RealizedPnL != nil {
+			v, err := realized.Add(*f.RealizedPnL)
+			if err != nil {
+				return model.Decimal{}, model.Decimal{}, fmt.Errorf("portfolio: day pnl: realized sum overflow: %w", err)
+			}
+			realized = v
 		}
-		sum = v
+		v, err := fees.Add(f.Fee)
+		if err != nil {
+			return model.Decimal{}, model.Decimal{}, fmt.Errorf("portfolio: day pnl: fee sum overflow: %w", err)
+		}
+		fees = v
 	}
-	return sum, nil
+	return realized, fees, nil
 }
 
 // EnsureSessionStartSnapshot guarantees an equity_snapshots row exists at or

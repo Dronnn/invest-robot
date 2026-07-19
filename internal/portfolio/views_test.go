@@ -137,6 +137,64 @@ func TestDayPnL_RealizedAndUnrealizedSplit(t *testing.T) {
 	}
 }
 
+func TestDayPnL_FeesReportedSeparatelyNotAsUnrealized(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	uid := seedInstrument(t, db, "uid-1", 1).UID
+	seedIntent(t, db, uid, "buy-1")
+	seedIntent(t, db, uid, "sell-1")
+	p, sim := newTestPortfolio()
+	sessionStart := sim.Now()
+
+	if err := p.Init(ctx, db, mustDecimal(t, "10000")); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if err := p.EnsureSessionStartSnapshot(ctx, db, sessionStart); err != nil {
+		t.Fatalf("ensure session start snapshot: %v", err)
+	}
+
+	sim.Advance(time.Hour)
+
+	// A flat round-trip at the same price with a 5 fee on each leg: gross
+	// realized PnL is 0, but the account paid 10 in commissions.
+	if err := applyFillViaExecution(t, ctx, p, db, FillApplication{
+		Fill:          model.Fill{IntentID: "buy-1", Price: mustDecimal(t, "100"), Qty: 10, Fee: mustDecimal(t, "5"), TS: sim.Now()},
+		InstrumentUID: uid, Side: model.SideBuy, Lot: 1,
+	}); err != nil {
+		t.Fatalf("buy: %v", err)
+	}
+	if err := applyFillViaExecution(t, ctx, p, db, FillApplication{
+		Fill:          model.Fill{IntentID: "sell-1", Price: mustDecimal(t, "100"), Qty: 10, Fee: mustDecimal(t, "5"), TS: sim.Now()},
+		InstrumentUID: uid, Side: model.SideSell, Lot: 1,
+	}); err != nil {
+		t.Fatalf("sell: %v", err)
+	}
+
+	if _, err := p.MarkToMarket(ctx, db, map[model.InstrumentUID]model.Quote{}, sim.Now()); err != nil {
+		t.Fatalf("mark to market: %v", err)
+	}
+
+	result, err := p.DayPnL(ctx, db, sessionStart)
+	if err != nil {
+		t.Fatalf("day pnl: %v", err)
+	}
+	// Gross realized is 0 (flat round-trip); fees are their own 10; unrealized
+	// must be 0 (position fully closed), NOT the -10 that the fee outflow would
+	// masquerade as if it were folded into unrealized.
+	if result.Realized.String() != "0" {
+		t.Errorf("realized = %s, want 0", result.Realized)
+	}
+	if result.Fees.String() != "10" {
+		t.Errorf("fees = %s, want 10", result.Fees)
+	}
+	if !result.Unrealized.IsZero() {
+		t.Errorf("unrealized = %s, want 0 (fees must not surface as unrealized loss)", result.Unrealized)
+	}
+	if result.Total.String() != "-10" {
+		t.Errorf("total = %s, want -10 (net of the two 5 commissions)", result.Total)
+	}
+}
+
 func TestEnsureSessionStartSnapshot_IdempotentAndRollsForward(t *testing.T) {
 	db := openTest(t)
 	ctx := context.Background()
