@@ -183,17 +183,16 @@ account_id?, data?, error?}`. Lifecycle fields (`attempt`, `subscriptions`,
   `exit` still apply regardless of filtering (they model the fake process's
   own timeline, not the broker's).
 
-**Enum-family note:** the real streamed candle's `interval` is technically
-typed `SubscriptionInterval` (`internal/render/stream_views.go`:
-`value.GetInterval().String()`), which would render as
-`SUBSCRIPTION_INTERVAL_FIVE_MINUTES`, not `CANDLE_INTERVAL_5_MIN`. This fake's
-fixtures use the `CANDLE_INTERVAL_*` family instead (that's the *unary*
-candles-get enum), and the robot's `internal/tinvestcli` wire types/tests were
-built independently against that same convention before this pass landed. This
-fidelity fix was deliberately **not** applied here — correcting the enum
-family would silently break the adapter's interval parsing and several of its
-already-passing stream tests. Flagged as a cross-repo decision for whoever
-owns `internal/tinvestcli`'s wire contract, not fixed unilaterally.
+**Enum-family note:** the streamed candle's `interval` is typed
+`SubscriptionInterval` (`internal/render/stream_views.go`:
+`value.GetInterval().String()`), so it renders as
+`SUBSCRIPTION_INTERVAL_FIVE_MINUTES` — a distinct family from the *unary*
+candles-get `CANDLE_INTERVAL_*` enum. The stream fixtures and the fake's
+`candleIntervalNames` map use the `SUBSCRIPTION_INTERVAL_*` family, matching the
+real CLI and the generated proto (`SubscriptionInterval_name`); the robot's
+`internal/tinvestcli` stream adapter parses the same family. Do not conflate the
+two: unary candles use `CANDLE_INTERVAL_*`, streamed candles use
+`SUBSCRIPTION_INTERVAL_*`.
 
 #### Timestamp convention
 

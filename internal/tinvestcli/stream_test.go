@@ -133,7 +133,7 @@ func TestStreamHappyPlayback(t *testing.T) {
 	if sberCandle == nil {
 		t.Fatal("no SBER candle event")
 	}
-	if sberCandle.Interval != "CANDLE_INTERVAL_5_MIN" {
+	if sberCandle.Interval != "SUBSCRIPTION_INTERVAL_FIVE_MINUTES" {
 		t.Fatalf("candle interval = %q", sberCandle.Interval)
 	}
 	eqDec(t, sberCandle.Close, "270.8")
@@ -167,7 +167,7 @@ func TestStreamCandleTimeIsEventTime(t *testing.T) {
 	script := `[
 	  {"type":"connected","time":"2026-07-19T10:05:00Z","data":{"attempt":1,"subscriptions":1}},
 	  {"type":"candle","time":"2026-07-19T10:05:00Z","data":{
-	     "instrument_uid":"` + sberUID + `","interval":"CANDLE_INTERVAL_5_MIN",
+	     "instrument_uid":"` + sberUID + `","interval":"SUBSCRIPTION_INTERVAL_FIVE_MINUTES",
 	     "open":{"value":"100"},"high":{"value":"101"},"low":{"value":"99"},"close":{"value":"100.5"},
 	     "volume":"10","candle_time":"2026-07-19T10:00:00Z","source":"CANDLE_SOURCE_EXCHANGE"}}
 	]`

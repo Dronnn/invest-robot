@@ -18,24 +18,20 @@ const defaultStreamTime = "2026-07-19T10:00:00Z"
 // candleIntervalNames maps the short --candles flag form to the proto enum
 // name carried in a streamed candle frame's data.interval.
 //
-// The real streamed Candle message's Interval field is actually typed
+// The streamed Candle message's Interval field is typed
 // investapi.SubscriptionInterval (internal/render/stream_views.go:
-// value.GetInterval().String()), whose names are "SUBSCRIPTION_INTERVAL_*",
-// not "CANDLE_INTERVAL_*" (that family belongs to the unary candles-get
-// request/response). This fake's fixtures — and the robot's
-// internal/tinvestcli wire types and tests, built independently against those
-// fixtures — already standardized on the CANDLE_INTERVAL_* family before this
-// pass. Correcting the enum family here would silently break that adapter's
-// interval parsing and several of its stream tests, so this map preserves the
-// existing (possibly wrong-enum-family) convention rather than "fixing" it
-// unilaterally; the discrepancy is called out in README.md and should be
-// resolved as a cross-repo decision, not a one-sided fixture edit.
+// value.GetInterval().String()), so its names are "SUBSCRIPTION_INTERVAL_*".
+// This is a different enum family from the unary candles-get "CANDLE_INTERVAL_*"
+// request/response — the two must not be conflated. The values below match the
+// generated proto (internal/pb/investapi/marketdata.pb.go, SubscriptionInterval_name)
+// exactly, and the robot's internal/tinvestcli stream adapter parses the same
+// family.
 var candleIntervalNames = map[string]string{
-	"1m": "CANDLE_INTERVAL_1_MIN", "2m": "CANDLE_INTERVAL_2_MIN", "3m": "CANDLE_INTERVAL_3_MIN",
-	"5m": "CANDLE_INTERVAL_5_MIN", "10m": "CANDLE_INTERVAL_10_MIN", "15m": "CANDLE_INTERVAL_15_MIN",
-	"30m": "CANDLE_INTERVAL_30_MIN", "1h": "CANDLE_INTERVAL_HOUR", "2h": "CANDLE_INTERVAL_2_HOUR",
-	"4h": "CANDLE_INTERVAL_4_HOUR", "1d": "CANDLE_INTERVAL_DAY", "1w": "CANDLE_INTERVAL_WEEK",
-	"1M": "CANDLE_INTERVAL_MONTH",
+	"1m": "SUBSCRIPTION_INTERVAL_ONE_MINUTE", "2m": "SUBSCRIPTION_INTERVAL_2_MIN", "3m": "SUBSCRIPTION_INTERVAL_3_MIN",
+	"5m": "SUBSCRIPTION_INTERVAL_FIVE_MINUTES", "10m": "SUBSCRIPTION_INTERVAL_10_MIN", "15m": "SUBSCRIPTION_INTERVAL_FIFTEEN_MINUTES",
+	"30m": "SUBSCRIPTION_INTERVAL_30_MIN", "1h": "SUBSCRIPTION_INTERVAL_ONE_HOUR", "2h": "SUBSCRIPTION_INTERVAL_2_HOUR",
+	"4h": "SUBSCRIPTION_INTERVAL_4_HOUR", "1d": "SUBSCRIPTION_INTERVAL_ONE_DAY", "1w": "SUBSCRIPTION_INTERVAL_WEEK",
+	"1M": "SUBSCRIPTION_INTERVAL_MONTH",
 }
 
 // validOrderbookDepths are the depths the real CLI accepts for --orderbook,

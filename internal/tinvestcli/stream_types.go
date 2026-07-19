@@ -25,7 +25,7 @@ type CandleEvent struct {
 	Ticker        string
 	ClassCode     string
 	FIGI          string
-	Interval      string // proto enum form, e.g. "CANDLE_INTERVAL_5_MIN"
+	Interval      string // SubscriptionInterval enum form, e.g. "SUBSCRIPTION_INTERVAL_FIVE_MINUTES"
 	Open          model.Decimal
 	High          model.Decimal
 	Low           model.Decimal
@@ -40,14 +40,17 @@ type CandleEvent struct {
 
 func (CandleEvent) isStreamEvent() {}
 
-// streamIntervalModel maps the stream's proto interval enum onto the model's
-// interval tokens for the subset the robot trades on.
+// streamIntervalModel maps the stream's SubscriptionInterval enum onto the
+// model's interval tokens for the subset the robot trades on. Streamed candles
+// carry the SUBSCRIPTION_INTERVAL_* family (a distinct enum from the unary
+// candles-get CANDLE_INTERVAL_*); only that family is accepted here — a value
+// outside it makes Model report an unsupported-interval ProtocolError.
 var streamIntervalModel = map[string]model.CandleInterval{
-	"CANDLE_INTERVAL_1_MIN":  model.Interval1m,
-	"CANDLE_INTERVAL_5_MIN":  model.Interval5m,
-	"CANDLE_INTERVAL_15_MIN": model.Interval15m,
-	"CANDLE_INTERVAL_HOUR":   model.Interval1h,
-	"CANDLE_INTERVAL_DAY":    model.Interval1d,
+	"SUBSCRIPTION_INTERVAL_ONE_MINUTE":      model.Interval1m,
+	"SUBSCRIPTION_INTERVAL_FIVE_MINUTES":    model.Interval5m,
+	"SUBSCRIPTION_INTERVAL_FIFTEEN_MINUTES": model.Interval15m,
+	"SUBSCRIPTION_INTERVAL_ONE_HOUR":        model.Interval1h,
+	"SUBSCRIPTION_INTERVAL_ONE_DAY":         model.Interval1d,
 }
 
 // Model maps the event onto a model.Candle, erroring if the interval is outside

@@ -2,7 +2,7 @@
   { "type": "connected", "time": "2026-07-19T10:00:00Z", "data": { "attempt": 1, "subscriptions": 2 } },
   { "type": "candle", "time": "2026-07-19T10:00:00.342000000Z", "data": {
       "instrument_uid": "e6123145-9665-43e0-8413-cd61b8aa9b13", "ticker": "SBER", "class_code": "TQBR", "figi": "BBG004730N88",
-      "interval": "CANDLE_INTERVAL_5_MIN",
+      "interval": "SUBSCRIPTION_INTERVAL_FIVE_MINUTES",
       "open": { "units": "270", "nano": 500000000, "value": "270.5" },
       "high": { "units": "271", "nano": 0, "value": "271" },
       "low": { "units": "270", "nano": 400000000, "value": "270.4" },
@@ -14,7 +14,7 @@
       "price": { "units": "270", "nano": 800000000, "value": "270.8" }, "price_type": "LAST_PRICE_EXCHANGE", "time": "2026-07-19T10:00:30Z" } },
   { "type": "candle", "time": "2026-07-19T10:00:00.512000000Z", "data": {
       "instrument_uid": "962e2a95-02a9-4171-abd7-aa198dbe643a", "ticker": "GAZP", "class_code": "TQBR", "figi": "BBG004730RP0",
-      "interval": "CANDLE_INTERVAL_5_MIN",
+      "interval": "SUBSCRIPTION_INTERVAL_FIVE_MINUTES",
       "open": { "units": "128", "nano": 400000000, "value": "128.4" },
       "high": { "units": "128", "nano": 900000000, "value": "128.9" },
       "low": { "units": "128", "nano": 200000000, "value": "128.2" },
