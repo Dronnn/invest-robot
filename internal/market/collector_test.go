@@ -417,6 +417,37 @@ func TestQuoteFreshnessAndHealth(t *testing.T) {
 	}
 }
 
+// TestOrderbookQuoteIsHighFidelity proves a streamed order book is surfaced as a
+// stored quote carrying best bid/ask, so paper fills can use a real top-of-book
+// rather than the last-price fallback.
+func TestOrderbookQuoteIsHighFidelity(t *testing.T) {
+	b := newFakeBroker()
+	b.addInstrument("SBER@TQBR", uidSBER, "SBER")
+	db, s := tempStore(t)
+	c, _ := market.New(deps(b, s, clock.Real()), market.Config{Universe: []string{"SBER@TQBR"}, Interval: model.Interval5m})
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+	h := <-b.handles
+
+	obTime := time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC)
+	h.feed(tinvestcli.OrderbookEvent{
+		InstrumentUID: uidSBER, Depth: 10,
+		Bid: model.MustDecimal("270.4"), Ask: model.MustDecimal("270.6"), Time: obTime,
+	})
+
+	ctx := context.Background()
+	waitFor(t, "high-fidelity quote", func() bool {
+		q, ok, err := sqlite.QuoteRepo{}.Latest(ctx, db, uidSBER)
+		return err == nil && ok && q.HasBidAsk()
+	})
+	q, _, _ := sqlite.QuoteRepo{}.Latest(ctx, db, uidSBER)
+	if q.Bid.String() != "270.4" || q.Ask.String() != "270.6" {
+		t.Fatalf("stored quote bid/ask = %s/%s, want 270.4/270.6", q.Bid, q.Ask)
+	}
+}
+
 func TestStreamDownAuthIsTerminal(t *testing.T) {
 	b := newFakeBroker()
 	b.addInstrument("SBER@TQBR", uidSBER, "SBER")

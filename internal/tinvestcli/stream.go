@@ -320,6 +320,27 @@ func (s *Stream) dispatch(f wireStreamFrame, lastErr **BrokerError) error {
 			Time:          wp.Time.UTC(),
 		})
 
+	case "orderbook":
+		var wo wireStreamOrderbook
+		if err := json.Unmarshal(f.Data, &wo); err != nil {
+			return &ProtocolError{Reason: "malformed orderbook frame", Err: err}
+		}
+		ev := OrderbookEvent{
+			InstrumentUID: wo.InstrumentUID,
+			Ticker:        wo.Ticker,
+			ClassCode:     wo.ClassCode,
+			FIGI:          wo.FIGI,
+			Depth:         wo.Depth,
+			Time:          wo.Time.UTC(),
+		}
+		if len(wo.Bids) > 0 {
+			ev.Bid = wo.Bids[0].Price.Amount
+		}
+		if len(wo.Asks) > 0 {
+			ev.Ask = wo.Asks[0].Price.Amount
+		}
+		s.deliverOrderbook(ev)
+
 	case "error":
 		be := f.Error.broker()
 		*lastErr = &be
@@ -482,6 +503,17 @@ func (s *Stream) deliverLastPrice(ev LastPriceEvent) {
 	s.signal()
 }
 
+func (s *Stream) deliverOrderbook(ev OrderbookEvent) {
+	s.mu.Lock()
+	// Order books are replaceable: coalesce to the latest per instrument by
+	// replacing any still-queued book for the same instrument in place.
+	if !s.replaceOrderbookLocked(ev) && len(s.queue) < s.client.cfg.StreamQueueSize {
+		s.queue = append(s.queue, ev)
+	}
+	s.mu.Unlock()
+	s.signal()
+}
+
 func (s *Stream) deliverStatus(ev StatusEvent) {
 	s.mu.Lock()
 	if len(s.queue) < s.client.cfg.StreamQueueSize {
@@ -503,6 +535,18 @@ func (s *Stream) deliverGap(ev GapEvent) {
 func (s *Stream) replaceLastPriceLocked(ev LastPriceEvent) bool {
 	for i := len(s.queue) - 1; i >= 0; i-- {
 		if p, ok := s.queue[i].(LastPriceEvent); ok && p.InstrumentUID == ev.InstrumentUID {
+			s.queue[i] = ev
+			return true
+		}
+	}
+	return false
+}
+
+// replaceOrderbookLocked replaces a still-queued order book for ev's instrument
+// with ev, returning true when it coalesced.
+func (s *Stream) replaceOrderbookLocked(ev OrderbookEvent) bool {
+	for i := len(s.queue) - 1; i >= 0; i-- {
+		if o, ok := s.queue[i].(OrderbookEvent); ok && o.InstrumentUID == ev.InstrumentUID {
 			s.queue[i] = ev
 			return true
 		}

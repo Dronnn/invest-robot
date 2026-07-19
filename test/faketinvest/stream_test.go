@@ -109,6 +109,77 @@ func TestStreamSubscriptionFiltering(t *testing.T) {
 	}
 }
 
+// TestStreamOrderbookReplay proves the fake replays order-book frames when the
+// request subscribes to --orderbook, and filters them out otherwise.
+func TestStreamOrderbookReplay(t *testing.T) {
+	uid := "e6123145-9665-43e0-8413-cd61b8aa9b13"
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "scenario.toml"), `
+account_id = "acc"
+[[instruments]]
+uid = "`+uid+`"
+ticker = "SBER"
+class_code = "TQBR"
+[stream]
+script = "s.json"
+`)
+	writeFile(t, filepath.Join(dir, "s.json"), `[
+  {"type":"connected","time":"2026-07-19T10:00:00Z","data":{"attempt":1,"subscriptions":1}},
+  {"type":"orderbook","time":"2026-07-19T10:00:00Z","data":{"instrument_uid":"`+uid+`","depth":10,"bids":[{"price":{"value":"270.4"},"quantity":"120"}],"asks":[{"price":{"value":"270.6"},"quantity":"90"}],"orderbook_time":"2026-07-19T10:00:00Z"}}
+]`)
+
+	// Subscribed: the order-book frame is replayed with its top-of-book.
+	code, out := invoke(t, map[string]string{"FAKETINVEST_SCENARIO": dir},
+		"stream", "marketdata", "--instrument", uid, "--orderbook=10", "-o", "json")
+	if code != exitOK {
+		t.Fatalf("exit = %d, want 0; out:\n%s", code, out)
+	}
+	var ob *streamFrame
+	for _, f := range decodeFrames(t, out) {
+		if f.Type == "orderbook" {
+			frame := f
+			ob = &frame
+			break
+		}
+	}
+	if ob == nil {
+		t.Fatal("no orderbook frame replayed under an --orderbook subscription")
+	}
+	var data struct {
+		Bids []struct {
+			Price struct {
+				Value string `json:"value"`
+			} `json:"price"`
+		} `json:"bids"`
+		Asks []struct {
+			Price struct {
+				Value string `json:"value"`
+			} `json:"price"`
+		} `json:"asks"`
+	}
+	if err := json.Unmarshal(ob.Data, &data); err != nil {
+		t.Fatalf("decode orderbook data: %v", err)
+	}
+	if len(data.Bids) == 0 || data.Bids[0].Price.Value != "270.4" {
+		t.Errorf("best bid = %+v, want 270.4", data.Bids)
+	}
+	if len(data.Asks) == 0 || data.Asks[0].Price.Value != "270.6" {
+		t.Errorf("best ask = %+v, want 270.6", data.Asks)
+	}
+
+	// Not subscribed (candles only): the order-book frame is filtered out.
+	code, out = invoke(t, map[string]string{"FAKETINVEST_SCENARIO": dir},
+		"stream", "marketdata", "--instrument", uid, "--candles=5m", "-o", "json")
+	if code != exitOK {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	for _, f := range decodeFrames(t, out) {
+		if f.Type == "orderbook" {
+			t.Error("orderbook frame leaked through without an --orderbook subscription")
+		}
+	}
+}
+
 // TestStreamSubscriptionValidation mirrors the real CLI's local (no-network)
 // `stream marketdata` validation: at least one --instrument, at least one
 // data-kind flag, a recognized --candles interval, and a recognized

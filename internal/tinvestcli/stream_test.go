@@ -60,6 +60,15 @@ func countLastPrices(evs []Event) (n int) {
 	return
 }
 
+func countOrderbooks(evs []Event) (n int) {
+	for _, e := range evs {
+		if _, ok := e.(OrderbookEvent); ok {
+			n++
+		}
+	}
+	return
+}
+
 func countConnectedAttempt1(evs []Event) (n int) {
 	for _, e := range evs {
 		if se, ok := e.(StatusEvent); ok && se.Kind == StatusConnected && se.Attempt == 1 {
@@ -202,6 +211,57 @@ func TestStreamCandleTimeIsEventTime(t *testing.T) {
 	}
 	if candle.CandleTime.Equal(frameTime) {
 		t.Fatal("CandleTime must not be the frame receipt time")
+	}
+}
+
+// TestStreamOrderbookBestBidAsk proves an order-book frame is parsed into an
+// OrderbookEvent carrying top-of-book (best bid/ask), rather than being
+// swallowed as an unknown lifecycle status.
+func TestStreamOrderbookBestBidAsk(t *testing.T) {
+	script := `[
+	  {"type":"connected","time":"2026-07-19T10:00:00Z","data":{"attempt":1,"subscriptions":1}},
+	  {"type":"orderbook","time":"2026-07-19T10:00:00Z","data":{
+	     "instrument_uid":"` + sberUID + `","ticker":"SBER","class_code":"TQBR","depth":10,"is_consistent":true,
+	     "bids":[{"price":{"value":"270.4"},"quantity":"120"},{"price":{"value":"270.3"},"quantity":"200"}],
+	     "asks":[{"price":{"value":"270.6"},"quantity":"90"},{"price":{"value":"270.7"},"quantity":"150"}],
+	     "orderbook_time":"2026-07-19T10:00:00Z","orderbook_type":"ORDERBOOK_TYPE_EXCHANGE"}}
+	]`
+	dir := writeScenario(t, map[string]string{
+		"scenario.toml": "account_id = \"test-ob\"\n[stream]\nscript = \"stream.json\"\n",
+		"stream.json":   script,
+	})
+	c := newClient(t, dir, t.TempDir(), streamFast)
+	s, err := c.StreamMarketdata(context.Background(), StreamRequest{Instruments: []string{sberUID}, OrderbookDepth: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	got := readEvents(t, s, func(e []Event) bool { return countOrderbooks(e) >= 1 }, 5*time.Second)
+	var ob *OrderbookEvent
+	for _, e := range got {
+		if o, ok := e.(OrderbookEvent); ok {
+			cp := o
+			ob = &cp
+			break
+		}
+	}
+	if ob == nil {
+		t.Fatalf("no orderbook event: %s", kinds(got))
+	}
+	if ob.Depth != 10 {
+		t.Fatalf("depth = %d, want 10", ob.Depth)
+	}
+	eqDec(t, ob.Bid, "270.4")
+	eqDec(t, ob.Ask, "270.6")
+	q := ob.Quote()
+	eqDec(t, q.Bid, "270.4")
+	eqDec(t, q.Ask, "270.6")
+	if !q.HasBidAsk() {
+		t.Fatal("orderbook quote should have bid and ask")
+	}
+	if !q.Last.IsZero() {
+		t.Fatal("orderbook quote carries no last price")
 	}
 }
 

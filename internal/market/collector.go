@@ -28,6 +28,11 @@ type Config struct {
 	// StreamRestartBackoff is the cool-down before the collector reconnects a
 	// stream that ended non-terminally. Default 5s.
 	StreamRestartBackoff time.Duration
+	// OrderbookDepth is the order-book subscription depth; the collector only
+	// reads top-of-book, so any valid depth (1, 10, 20, 30, 40, 50) works.
+	// Default 1. Zero or negative disables order-book subscription (quotes then
+	// fall back to last price only).
+	OrderbookDepth int
 }
 
 // Deps are the collector's injected collaborators.
@@ -43,6 +48,7 @@ type Deps struct {
 const (
 	defaultLookbackBars   = 300
 	defaultRestartBackoff = 5 * time.Second
+	defaultOrderbookDepth = 1
 )
 
 // Collector resolves the universe, backfills authoritative candles, and
@@ -101,6 +107,9 @@ func New(deps Deps, cfg Config) (*Collector, error) {
 	}
 	if cfg.StreamRestartBackoff <= 0 {
 		cfg.StreamRestartBackoff = defaultRestartBackoff
+	}
+	if cfg.OrderbookDepth == 0 {
+		cfg.OrderbookDepth = defaultOrderbookDepth
 	}
 	return &Collector{
 		broker:      deps.Broker,
@@ -247,6 +256,8 @@ func (c *Collector) consume(ctx context.Context, handle StreamHandle) error {
 				c.onCandle(ctx, e)
 			case tinvestcli.LastPriceEvent:
 				c.onLastPrice(ctx, e)
+			case tinvestcli.OrderbookEvent:
+				c.onOrderbook(ctx, e)
 			case tinvestcli.StatusEvent:
 				c.onStatus(ctx, e)
 			case tinvestcli.GapEvent:
@@ -258,18 +269,25 @@ func (c *Collector) consume(ctx context.Context, handle StreamHandle) error {
 	}
 }
 
-// streamRequest subscribes to candles and last prices for the whole universe.
+// streamRequest subscribes to candles, last prices, and (when a positive depth
+// is configured) the order book for the whole universe. Top-of-book quotes let
+// paper fills use a real bid/ask rather than the low-fidelity last-price
+// fallback.
 func (c *Collector) streamRequest() tinvestcli.StreamRequest {
 	ids := make([]string, len(c.universe))
 	for i, r := range c.universe {
 		ids[i] = string(r.uid)
 	}
-	return tinvestcli.StreamRequest{
+	req := tinvestcli.StreamRequest{
 		Instruments:    ids,
 		Candles:        true,
 		CandleInterval: c.interval,
 		LastPrice:      true,
 	}
+	if c.cfg.OrderbookDepth > 0 {
+		req.OrderbookDepth = c.cfg.OrderbookDepth
+	}
+	return req
 }
 
 // onCandle ingests a forming bar (written incomplete) and, on rollover to a
@@ -353,6 +371,25 @@ func (c *Collector) onLastPrice(ctx context.Context, e tinvestcli.LastPriceEvent
 	uid := model.InstrumentUID(e.InstrumentUID)
 	if err := c.quotes.InsertQuote(ctx, e.Quote()); err != nil {
 		c.logEvent(ctx, LevelWarn, "quote_insert_failed", fmt.Sprintf("%s: %v", uid, err))
+		c.markStale(uid)
+		return
+	}
+	c.mu.Lock()
+	if h := c.instHealth[uid]; h != nil {
+		h.lastQuote = e.Time
+		h.stale = false
+	}
+	c.mu.Unlock()
+}
+
+// onOrderbook ingests a top-of-book snapshot as a high-fidelity quote (best bid
+// and ask). The paper executor prefers a quote with a real bid/ask and only
+// falls back to last price when they are absent, so surfacing these raises fill
+// fidelity. The stored quote carries its own fidelity signal (Quote.HasBidAsk).
+func (c *Collector) onOrderbook(ctx context.Context, e tinvestcli.OrderbookEvent) {
+	uid := model.InstrumentUID(e.InstrumentUID)
+	if err := c.quotes.InsertQuote(ctx, e.Quote()); err != nil {
+		c.logEvent(ctx, LevelWarn, "orderbook_insert_failed", fmt.Sprintf("%s: %v", uid, err))
 		c.markStale(uid)
 		return
 	}

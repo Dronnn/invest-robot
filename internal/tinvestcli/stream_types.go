@@ -9,9 +9,9 @@ import (
 )
 
 // Event is a marker interface for everything StreamMarketdata delivers on its
-// channel. The concrete types are CandleEvent, LastPriceEvent, StatusEvent,
-// GapEvent, and StreamDownError. The set is closed (the marker method is
-// unexported), so a type switch over it is exhaustive.
+// channel. The concrete types are CandleEvent, LastPriceEvent, OrderbookEvent,
+// StatusEvent, GapEvent, and StreamDownError. The set is closed (the marker
+// method is unexported), so a type switch over it is exhaustive.
 type Event interface {
 	isStreamEvent()
 }
@@ -94,6 +94,35 @@ func (e LastPriceEvent) Quote() model.Quote {
 	return model.Quote{
 		InstrumentUID: model.InstrumentUID(e.InstrumentUID),
 		Last:          e.Price,
+		TS:            e.Time.UTC(),
+	}
+}
+
+// OrderbookEvent is a streamed order-book snapshot. The robot trades on
+// top-of-book, so Bid and Ask are the best (first) levels of each side; a
+// snapshot with an empty side leaves that price zero. Its event time is Time.
+type OrderbookEvent struct {
+	InstrumentUID string
+	Ticker        string
+	ClassCode     string
+	FIGI          string
+	Depth         int
+	Bid           model.Decimal
+	Ask           model.Decimal
+	Time          time.Time
+}
+
+func (OrderbookEvent) isStreamEvent() {}
+
+// Quote maps the top of book onto a model.Quote carrying the best bid and ask.
+// Last stays zero: an order-book snapshot reports no trade price. A consumer
+// distinguishes this high-fidelity quote from a last-price fallback via
+// Quote.HasBidAsk.
+func (e OrderbookEvent) Quote() model.Quote {
+	return model.Quote{
+		InstrumentUID: model.InstrumentUID(e.InstrumentUID),
+		Bid:           e.Bid,
+		Ask:           e.Ask,
 		TS:            e.Time.UTC(),
 	}
 }
@@ -202,6 +231,27 @@ type wireStreamLastPrice struct {
 	Price         Money     `json:"price"`
 	PriceType     string    `json:"price_type"`
 	Time          time.Time `json:"time"`
+}
+
+// wireStreamOrderbook mirrors the streamed order-book data payload
+// (render.StreamOrderBookView). Only top-of-book is read; the deeper levels,
+// consistency flag, and limits are ignored.
+type wireStreamOrderbook struct {
+	InstrumentUID string                     `json:"instrument_uid"`
+	Ticker        string                     `json:"ticker"`
+	ClassCode     string                     `json:"class_code"`
+	FIGI          string                     `json:"figi"`
+	Depth         int                        `json:"depth"`
+	Bids          []wireStreamOrderbookLevel `json:"bids"`
+	Asks          []wireStreamOrderbookLevel `json:"asks"`
+	Time          time.Time                  `json:"orderbook_time"`
+}
+
+// wireStreamOrderbookLevel is one price/quantity level of a book side. Price is
+// a quotation (value field); quantity is the contract's string-encoded integer.
+type wireStreamOrderbookLevel struct {
+	Price    Money       `json:"price"`
+	Quantity int64String `json:"quantity"`
 }
 
 // wireStreamLifecycle mirrors the lifecycle data payload (connected/disconnected/…).
