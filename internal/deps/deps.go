@@ -9,5 +9,4 @@ import (
 	_ "github.com/charmbracelet/bubbles/list"
 	_ "github.com/charmbracelet/bubbletea"
 	_ "github.com/charmbracelet/lipgloss"
-	_ "modernc.org/sqlite"
 )
