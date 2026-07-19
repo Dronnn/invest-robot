@@ -71,3 +71,13 @@ func (j *Journal) Open(ctx context.Context, q sqlite.Querier, ni NewIntent) (mod
 func (j *Journal) Transition(ctx context.Context, q sqlite.Querier, id string, from, to model.IntentState) error {
 	return (sqlite.IntentRepo{}).UpdateState(ctx, q, id, from, to, j.clock.Now())
 }
+
+// TransitionWithReason is Transition plus recording a human-readable reason
+// on the intent row (order_intents.reason) in the same statement — for
+// rejected/canceled transitions where the prose belongs on the row, not only
+// in the events log. This still goes through the store's compare-and-swap
+// (Journal remains the only sanctioned way execution mutates an intent's
+// state); it does not bypass it.
+func (j *Journal) TransitionWithReason(ctx context.Context, q sqlite.Querier, id string, from, to model.IntentState, reason string) error {
+	return (sqlite.IntentRepo{}).UpdateStateWithReason(ctx, q, id, from, to, j.clock.Now(), reason)
+}

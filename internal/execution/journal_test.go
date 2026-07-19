@@ -97,6 +97,31 @@ func TestJournal_OpenPersistsNewBeforeAnyTransition(t *testing.T) {
 	}
 }
 
+func TestJournal_TransitionWithReasonPersistsReason(t *testing.T) {
+	ctx := context.Background()
+	db := journalDB(t)
+	decID := seedDecisionRow(t, db, "uid-1")
+	j := NewJournal(clock.NewSimulated(time.Unix(1000, 0)))
+
+	in, err := j.Open(ctx, db, NewIntent{DecisionID: decID, InstrumentUID: "uid-1", Side: model.SideBuy, Qty: 1, Type: model.OrderMarket, TimeInForce: model.TIFDay})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := j.TransitionWithReason(ctx, db, in.ClientOrderID, model.IntentNew, model.IntentRejected, "unknown or invalid price tick"); err != nil {
+		t.Fatalf("TransitionWithReason: %v", err)
+	}
+	got, err := (sqlite.IntentRepo{}).Get(ctx, db, in.ClientOrderID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != model.IntentRejected {
+		t.Errorf("state = %s, want rejected", got.State)
+	}
+	if got.Reason != "unknown or invalid price tick" {
+		t.Errorf("reason = %q, want %q", got.Reason, "unknown or invalid price tick")
+	}
+}
+
 func TestJournal_TransitionSurfacesCASConflict(t *testing.T) {
 	ctx := context.Background()
 	db := journalDB(t)
