@@ -1,0 +1,13 @@
+/bin/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+robot.toml
+
+# local working documentation — never published
+docs/
+logs/
+
+# stray build artifact from `go build ./test/faketinvest` at repo root
+/faketinvest

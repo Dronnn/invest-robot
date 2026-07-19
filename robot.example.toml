@@ -1,0 +1,60 @@
+# invest-robot configuration.
+#
+# Copy this file to robot.toml and edit it. robot.toml is gitignored because
+# it may hold your tinvest profile/account references; the broker token
+# itself is never stored here (tinvest resolves it from env/token
+# file/profile).
+#
+# Decoding is strict: unknown keys are a startup error.
+
+# Trading mode: "paper" (default) or "backtest". "real" is not available in
+# Phase 1 — the robot refuses to start if mode = "real" or real.enable = true.
+mode = "paper"
+
+[tinvest]
+# Path to the tinvest binary. Leave empty to resolve it from $PATH.
+path = ""
+profile = "default"
+account = ""
+
+[universe]
+# Instrument tickers or UIDs the robot watches and may trade.
+instruments = ["SBER", "GAZP"]
+
+[schedule]
+# Decision cycle cadence, aligned to completed candle boundaries.
+interval = "5m"
+# Trading session window, "HH:MM" in `timezone`. Empty = no restriction.
+session_start = "10:00"
+session_end = "18:45"
+timezone = "Europe/Moscow"
+
+[engine]
+# Decision engine. Only "rules" (deterministic, no network) exists in
+# Phase 1.
+active = "rules"
+
+[risk]
+# All money limits are decimal strings, e.g. "50000.00".
+max_position_notional = "50000"
+max_total_exposure = "150000"
+max_orders_per_cycle = 5
+max_orders_per_day = 20
+max_daily_loss = "5000"
+# Empty allowlist = no additional restriction beyond [universe].
+allowlist = []
+cash_floor = "10000"
+
+[paper]
+starting_cash = "100000"
+slippage_bps = 5
+commission_rate = "0.0004"
+
+[storage]
+# Empty = default under $XDG_CONFIG_HOME/invest-robot/robot.db
+# (or ~/.config/invest-robot/robot.db when XDG_CONFIG_HOME is unset).
+db_path = ""
+
+[real]
+# Must stay false in Phase 1.
+enable = false

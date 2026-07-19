@@ -1,0 +1,12 @@
+{
+  "outcomes": [
+    {
+      "intent_id": "intent-9001",
+      "client_order_id": "hostile-order-1",
+      "account_id": "test-brokerage-0002",
+      "outcome": "placed",
+      "order_id": "ord-hostile-order-1",
+      "lifecycle": "EXECUTION_REPORT_STATUS_FILL"
+    }
+  ]
+}

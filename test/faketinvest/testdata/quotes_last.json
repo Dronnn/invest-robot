@@ -1,0 +1,39 @@
+{
+  "ok": true,
+  "data": {
+    "last_prices": [
+      {
+        "instrument_uid": "e6123145-9665-43e0-8413-cd61b8aa9b13",
+        "ticker": "SBER",
+        "class_code": "TQBR",
+        "figi": "BBG004730N88",
+        "price": {
+          "units": "270",
+          "nano": 500000000,
+          "value": "270.5"
+        },
+        "price_type": "LAST_PRICE_EXCHANGE",
+        "time": "2026-07-19T10:00:00Z"
+      },
+      {
+        "instrument_uid": "962e2a95-02a9-4171-abd7-aa198dbe643a",
+        "ticker": "GAZP",
+        "class_code": "TQBR",
+        "figi": "BBG004730RP0",
+        "price": {
+          "units": "128",
+          "nano": 400000000,
+          "value": "128.4"
+        },
+        "price_type": "LAST_PRICE_EXCHANGE",
+        "time": "2026-07-19T10:00:00Z"
+      }
+    ]
+  },
+  "meta": {
+    "account_id": "test-brokerage-0001",
+    "elapsed_ms": 0,
+    "contract": "1.49",
+    "schema_version": "0.1"
+  }
+}

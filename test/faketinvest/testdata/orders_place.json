@@ -1,0 +1,49 @@
+{
+  "ok": true,
+  "data": {
+    "order": {
+      "order_id": "ord-happy-1",
+      "client_order_id": "happy-1",
+      "lifecycle": "EXECUTION_REPORT_STATUS_FILL",
+      "direction": "ORDER_DIRECTION_BUY",
+      "order_type": "ORDER_TYPE_LIMIT",
+      "lots": {
+        "requested": 1,
+        "executed": 1,
+        "remaining": 0
+      },
+      "instrument_uid": "e6123145-9665-43e0-8413-cd61b8aa9b13",
+      "ticker": "SBER",
+      "initial_order_price": {
+        "units": "270",
+        "nano": 500000000,
+        "value": "270.5",
+        "currency": "rub"
+      },
+      "executed_order_price": {
+        "units": "270",
+        "nano": 600000000,
+        "value": "270.6",
+        "currency": "rub"
+      },
+      "total_order_amount": {
+        "units": "2706",
+        "nano": 0,
+        "value": "2706",
+        "currency": "rub"
+      },
+      "initial_commission": {
+        "units": "1",
+        "nano": 350000000,
+        "value": "1.35",
+        "currency": "rub"
+      }
+    }
+  },
+  "meta": {
+    "account_id": "test-brokerage-0001",
+    "elapsed_ms": 0,
+    "contract": "1.49",
+    "schema_version": "0.1"
+  }
+}

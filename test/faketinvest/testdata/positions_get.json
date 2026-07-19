@@ -1,0 +1,39 @@
+{
+  "ok": true,
+  "data": {
+    "positions": {
+      "account_id": "test-brokerage-0001",
+      "money": [
+        {
+          "units": "45900",
+          "nano": 0,
+          "value": "45900",
+          "currency": "rub"
+        }
+      ],
+      "blocked_money": [],
+      "securities": [
+        {
+          "instrument_uid": "e6123145-9665-43e0-8413-cd61b8aa9b13",
+          "position_uid": "pos-sber",
+          "figi": "BBG004730N88",
+          "ticker": "SBER",
+          "class_code": "TQBR",
+          "instrument_type": "share",
+          "balance": "100",
+          "blocked": "0",
+          "exchange_blocked": false
+        }
+      ],
+      "futures": [],
+      "options": [],
+      "limits_loading_in_progress": false
+    }
+  },
+  "meta": {
+    "account_id": "test-brokerage-0001",
+    "elapsed_ms": 0,
+    "contract": "1.49",
+    "schema_version": "0.1"
+  }
+}

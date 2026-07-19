@@ -1,0 +1,91 @@
+{
+  "ok": true,
+  "data": {
+    "orderbook": {
+      "instrument_uid": "e6123145-9665-43e0-8413-cd61b8aa9b13",
+      "ticker": "SBER",
+      "class_code": "TQBR",
+      "figi": "BBG004730N88",
+      "depth": 10,
+      "bids": [
+        {
+          "price": {
+            "units": "270",
+            "nano": 400000000,
+            "value": "270.4"
+          },
+          "quantity": "120"
+        },
+        {
+          "price": {
+            "units": "270",
+            "nano": 300000000,
+            "value": "270.3"
+          },
+          "quantity": "340"
+        },
+        {
+          "price": {
+            "units": "270",
+            "nano": 200000000,
+            "value": "270.2"
+          },
+          "quantity": "500"
+        }
+      ],
+      "asks": [
+        {
+          "price": {
+            "units": "270",
+            "nano": 600000000,
+            "value": "270.6"
+          },
+          "quantity": "150"
+        },
+        {
+          "price": {
+            "units": "270",
+            "nano": 700000000,
+            "value": "270.7"
+          },
+          "quantity": "280"
+        },
+        {
+          "price": {
+            "units": "270",
+            "nano": 800000000,
+            "value": "270.8"
+          },
+          "quantity": "410"
+        }
+      ],
+      "last_price": {
+        "units": "270",
+        "nano": 500000000,
+        "value": "270.5"
+      },
+      "close_price": {
+        "units": "269",
+        "nano": 800000000,
+        "value": "269.8"
+      },
+      "limit_up": {
+        "units": "297",
+        "nano": 500000000,
+        "value": "297.5"
+      },
+      "limit_down": {
+        "units": "243",
+        "nano": 500000000,
+        "value": "243.5"
+      },
+      "orderbook_time": "2026-07-19T10:00:00Z"
+    }
+  },
+  "meta": {
+    "account_id": "test-brokerage-0001",
+    "elapsed_ms": 0,
+    "contract": "1.49",
+    "schema_version": "0.1"
+  }
+}

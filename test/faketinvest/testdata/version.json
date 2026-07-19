@@ -1,0 +1,14 @@
+{
+  "ok": true,
+  "data": {
+    "version": "0.1.0",
+    "contract": "1.49",
+    "schema_version": "0.1",
+    "go": "go1.26"
+  },
+  "meta": {
+    "elapsed_ms": 0,
+    "contract": "1.49",
+    "schema_version": "0.1"
+  }
+}

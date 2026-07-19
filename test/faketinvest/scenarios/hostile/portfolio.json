@@ -1,0 +1,149 @@
+{
+  "portfolio": {
+    "account_id": "test-brokerage-0001",
+    "total_amount_portfolio": {
+      "units": "100000",
+      "nano": 0,
+      "value": "100000",
+      "currency": "rub"
+    },
+    "total_amount_shares": {
+      "units": "54100",
+      "nano": 0,
+      "value": "54100",
+      "currency": "rub"
+    },
+    "total_amount_bonds": {
+      "units": "0",
+      "nano": 0,
+      "value": "0",
+      "currency": "rub"
+    },
+    "total_amount_etf": {
+      "units": "0",
+      "nano": 0,
+      "value": "0",
+      "currency": "rub"
+    },
+    "total_amount_currencies": {
+      "units": "45900",
+      "nano": 0,
+      "value": "45900",
+      "currency": "rub"
+    },
+    "total_amount_futures": {
+      "units": "0",
+      "nano": 0,
+      "value": "0",
+      "currency": "rub"
+    },
+    "total_amount_options": {
+      "units": "0",
+      "nano": 0,
+      "value": "0",
+      "currency": "rub"
+    },
+    "total_amount_sp": {
+      "units": "0",
+      "nano": 0,
+      "value": "0",
+      "currency": "rub"
+    },
+    "total_amount_dfa": {
+      "units": "0",
+      "nano": 0,
+      "value": "0",
+      "currency": "rub"
+    },
+    "expected_yield": {
+      "units": "1",
+      "nano": 250000000,
+      "value": "1.25"
+    },
+    "daily_yield": {
+      "units": "540",
+      "nano": 0,
+      "value": "540",
+      "currency": "rub"
+    },
+    "daily_yield_relative": {
+      "units": "0",
+      "nano": 540000000,
+      "value": "0.54"
+    },
+    "positions": [
+      {
+        "instrument_uid": "e6123145-9665-43e0-8413-cd61b8aa9b13",
+        "position_uid": "pos-sber",
+        "figi": "BBG004730N88",
+        "ticker": "SBER",
+        "class_code": "TQBR",
+        "instrument_type": "share",
+        "quantity": {
+          "units": "100",
+          "nano": 0,
+          "value": "100"
+        },
+        "average_position_price": {
+          "units": "265",
+          "nano": 0,
+          "value": "265",
+          "currency": "rub"
+        },
+        "average_position_price_fifo": {
+          "units": "265",
+          "nano": 0,
+          "value": "265",
+          "currency": "rub"
+        },
+        "current_price": {
+          "units": "270",
+          "nano": 500000000,
+          "value": "270.5",
+          "currency": "rub"
+        },
+        "expected_yield": {
+          "units": "550",
+          "nano": 0,
+          "value": "550"
+        },
+        "expected_yield_fifo": {
+          "units": "550",
+          "nano": 0,
+          "value": "550"
+        },
+        "daily_yield": {
+          "units": "120",
+          "nano": 0,
+          "value": "120",
+          "currency": "rub"
+        },
+        "current_accrued_interest": {
+          "units": "0",
+          "nano": 0,
+          "value": "0",
+          "currency": "rub"
+        },
+        "blocked": false,
+        "blocked_lots": {
+          "units": "0",
+          "nano": 0,
+          "value": "0"
+        },
+        "variation_margin": {
+          "units": "0",
+          "nano": 0,
+          "value": "0",
+          "currency": "rub"
+        },
+        "variation_margin_settled": {
+          "units": "0",
+          "nano": 0,
+          "value": "0",
+          "currency": "rub"
+        }
+      }
+    ],
+    "virtual_positions": []
+  }
+}

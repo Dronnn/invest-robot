@@ -1,0 +1,90 @@
+# hostile scenario: exercises every unhappy path the robot must survive —
+# rate limiting, a network read failure, an outcome-unknown order placement, and
+# a market-data stream that disconnects mid-flight with a candle gap before the
+# process exits (so the robot's stream supervisor must restart it).
+account_id = "test-brokerage-0002"
+schema_version = "0.1"
+contract = "1.49"
+version = "0.1.0"
+go_version = "go1.26"
+default_latency_ms = 0
+
+[[instruments]]
+uid = "e6123145-9665-43e0-8413-cd61b8aa9b13"
+figi = "BBG004730N88"
+ticker = "SBER"
+class_code = "TQBR"
+name = "Sberbank"
+type = "INSTRUMENT_TYPE_SHARE"
+lot = 10
+currency = "rub"
+min_price_increment = "0.01"
+trading_status = "SECURITY_TRADING_STATUS_NORMAL_TRADING"
+last_price = "270.5"
+last_price_time = "2026-07-19T10:00:00Z"
+price_type = "LAST_PRICE_EXCHANGE"
+candles = "candles/SBER.json"
+
+[[instruments]]
+uid = "962e2a95-02a9-4171-abd7-aa198dbe643a"
+figi = "BBG004730RP0"
+ticker = "GAZP"
+class_code = "TQBR"
+name = "Gazprom"
+type = "INSTRUMENT_TYPE_SHARE"
+lot = 10
+currency = "rub"
+min_price_increment = "0.01"
+trading_status = "SECURITY_TRADING_STATUS_NORMAL_TRADING"
+last_price = "128.4"
+last_price_time = "2026-07-19T10:00:00Z"
+price_type = "LAST_PRICE_EXCHANGE"
+
+[responses]
+portfolio = "portfolio.json"
+positions = "positions.json"
+orders_reconcile = "orders_reconcile.json"
+
+[orders]
+order_id_prefix = "ord-"
+
+[orders.place]
+lifecycle = "EXECUTION_REPORT_STATUS_FILL"
+executed_price = "270.6"
+commission = "1.35"
+currency = "rub"
+
+# The second `quotes last` in a run is rate limited; the caller must honor
+# retry_after_ms before retrying (exit 4).
+[[fail]]
+command = "quotes last"
+on_call = 2
+code = "RATE_LIMITED"
+message = "unary rate limit exceeded for market data"
+retryable = true
+retry_after_ms = 1500
+
+# The first candle read fails with a transient network error (exit 6); reads may
+# be retried.
+[[fail]]
+command = "candles get"
+on_call = 1
+code = "NETWORK"
+message = "connection reset by peer"
+retryable = true
+phase = "sent_unconfirmed"
+
+# The first order placement returns outcome-unknown (exit 7): the send may have
+# reached the broker, so the caller MUST reconcile before any retry. The
+# reconcile order id defaults to the request's --order-id.
+[[fail]]
+command = "orders place"
+on_call = 1
+code = "UNCONFIRMED"
+message = "order sent, outcome unknown"
+phase = "sent_unconfirmed"
+reconcile_command = "tinvest orders reconcile"
+
+[stream]
+script = "stream/marketdata.json"
+shutdown_time = "2026-07-19T10:05:00Z"

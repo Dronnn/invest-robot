@@ -1,0 +1,67 @@
+{
+  "ok": true,
+  "data": {
+    "operations": [
+      {
+        "cursor": "c1",
+        "id": "op-1001",
+        "name": "Buy SBER",
+        "date": "2026-07-19T09:01:00Z",
+        "type": "OPERATION_TYPE_BUY",
+        "state": "OPERATION_STATE_EXECUTED",
+        "instrument_uid": "e6123145-9665-43e0-8413-cd61b8aa9b13",
+        "figi": "BBG004730N88",
+        "ticker": "SBER",
+        "class_code": "TQBR",
+        "instrument_type": "share",
+        "instrument_kind": "INSTRUMENT_TYPE_SHARE",
+        "payment": {
+          "units": "-26500",
+          "nano": 0,
+          "value": "-26500",
+          "currency": "rub"
+        },
+        "price": {
+          "units": "265",
+          "nano": 0,
+          "value": "265",
+          "currency": "rub"
+        },
+        "commission": {
+          "units": "-13",
+          "nano": -250000000,
+          "value": "-13.25",
+          "currency": "rub"
+        },
+        "yield": {
+          "units": "0",
+          "nano": 0,
+          "value": "0",
+          "currency": "rub"
+        },
+        "yield_relative": {
+          "units": "0",
+          "nano": 0,
+          "value": "0"
+        },
+        "accrued_interest": {
+          "units": "0",
+          "nano": 0,
+          "value": "0",
+          "currency": "rub"
+        },
+        "quantity": "100",
+        "quantity_rest": "0",
+        "quantity_done": "100",
+        "trade_count": 1
+      }
+    ],
+    "next_cursor": ""
+  },
+  "meta": {
+    "account_id": "test-brokerage-0001",
+    "elapsed_ms": 0,
+    "contract": "1.49",
+    "schema_version": "0.1"
+  }
+}

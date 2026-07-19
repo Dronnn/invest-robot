@@ -1,0 +1,129 @@
+{
+  "ok": true,
+  "data": {
+    "instrument_uid": "e6123145-9665-43e0-8413-cd61b8aa9b13",
+    "interval": "5m",
+    "from": "2026-07-19T09:00:00Z",
+    "to": "2026-07-19T09:20:00Z",
+    "candles": [
+      {
+        "time": "2026-07-19T09:00:00Z",
+        "open": {
+          "units": "270",
+          "nano": 0,
+          "value": "270"
+        },
+        "high": {
+          "units": "271",
+          "nano": 0,
+          "value": "271"
+        },
+        "low": {
+          "units": "269",
+          "nano": 500000000,
+          "value": "269.5"
+        },
+        "close": {
+          "units": "270",
+          "nano": 500000000,
+          "value": "270.5"
+        },
+        "volume": "1500",
+        "volume_buy": "800",
+        "volume_sell": "700",
+        "is_complete": true,
+        "source": "CANDLE_SOURCE_EXCHANGE"
+      },
+      {
+        "time": "2026-07-19T09:05:00Z",
+        "open": {
+          "units": "270",
+          "nano": 500000000,
+          "value": "270.5"
+        },
+        "high": {
+          "units": "272",
+          "nano": 0,
+          "value": "272"
+        },
+        "low": {
+          "units": "270",
+          "nano": 0,
+          "value": "270"
+        },
+        "close": {
+          "units": "271",
+          "nano": 500000000,
+          "value": "271.5"
+        },
+        "volume": "1800",
+        "volume_buy": "1000",
+        "volume_sell": "800",
+        "is_complete": true,
+        "source": "CANDLE_SOURCE_EXCHANGE"
+      },
+      {
+        "time": "2026-07-19T09:10:00Z",
+        "open": {
+          "units": "271",
+          "nano": 500000000,
+          "value": "271.5"
+        },
+        "high": {
+          "units": "272",
+          "nano": 500000000,
+          "value": "272.5"
+        },
+        "low": {
+          "units": "271",
+          "nano": 0,
+          "value": "271"
+        },
+        "close": {
+          "units": "272",
+          "nano": 0,
+          "value": "272"
+        },
+        "volume": "1650",
+        "volume_buy": "900",
+        "volume_sell": "750",
+        "is_complete": true,
+        "source": "CANDLE_SOURCE_EXCHANGE"
+      },
+      {
+        "time": "2026-07-19T09:15:00Z",
+        "open": {
+          "units": "272",
+          "nano": 0,
+          "value": "272"
+        },
+        "high": {
+          "units": "272",
+          "nano": 500000000,
+          "value": "272.5"
+        },
+        "low": {
+          "units": "271",
+          "nano": 500000000,
+          "value": "271.5"
+        },
+        "close": {
+          "units": "271",
+          "nano": 800000000,
+          "value": "271.8"
+        },
+        "volume": "900",
+        "volume_buy": "400",
+        "volume_sell": "500",
+        "is_complete": false,
+        "source": "CANDLE_SOURCE_EXCHANGE"
+      }
+    ]
+  },
+  "meta": {
+    "account_id": "test-brokerage-0001",
+    "elapsed_ms": 0,
+    "contract": "1.49",
+    "schema_version": "0.1"
+  }
+}
