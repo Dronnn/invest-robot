@@ -95,6 +95,57 @@ func TestCandleRepo_UpsertOnConflictOverwrites(t *testing.T) {
 	}
 }
 
+func TestCandleRepo_UpsertDoesNotRegressComplete(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	i := seedInstrument(t, db, "uid-1")
+	repo := CandleRepo{}
+	ts := time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC)
+
+	// Store a completed bar with a final close.
+	final := testCandle(i.UID, ts, true)
+	final.Close = model.MustDecimal("105")
+	if err := repo.Upsert(ctx, db, final); err != nil {
+		t.Fatalf("Upsert (complete): %v", err)
+	}
+
+	// A late incomplete update for the same timestamp must not overwrite it or
+	// flip complete back to 0.
+	late := testCandle(i.UID, ts, false)
+	late.Close = model.MustDecimal("99")
+	if err := repo.Upsert(ctx, db, late); err != nil {
+		t.Fatalf("Upsert (late incomplete): %v", err)
+	}
+
+	got, ok, err := repo.LatestComplete(ctx, db, i.UID, model.Interval5m)
+	if err != nil {
+		t.Fatalf("LatestComplete: %v", err)
+	}
+	if !ok {
+		t.Fatal("LatestComplete: ok = false, want true (complete bar must survive)")
+	}
+	if got.Close.String() != "105" {
+		t.Errorf("Close = %s, want 105 (incomplete update must not overwrite the complete bar)", got.Close)
+	}
+	if !got.Complete {
+		t.Error("Complete = false, want true (incomplete update must not regress the watermark)")
+	}
+
+	// A complete->complete correction is still allowed.
+	corrected := testCandle(i.UID, ts, true)
+	corrected.Close = model.MustDecimal("106")
+	if err := repo.Upsert(ctx, db, corrected); err != nil {
+		t.Fatalf("Upsert (complete correction): %v", err)
+	}
+	got, _, err = repo.LatestComplete(ctx, db, i.UID, model.Interval5m)
+	if err != nil {
+		t.Fatalf("LatestComplete after correction: %v", err)
+	}
+	if got.Close.String() != "106" {
+		t.Errorf("Close after complete correction = %s, want 106", got.Close)
+	}
+}
+
 func TestCandleRepo_LatestComplete_IgnoresIncomplete(t *testing.T) {
 	db := openTest(t)
 	ctx := context.Background()

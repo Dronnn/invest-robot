@@ -15,6 +15,15 @@ type CandleRepo struct{}
 
 // Upsert inserts c or, if a row already exists for its
 // (instrument_uid, interval, ts), replaces the OHLCV/complete columns.
+//
+// One conflict case is deliberately a no-op: an incomplete candle never
+// overwrites a stored complete one. A complete bar is a decision watermark
+// with final OHLCV; a delayed stream update for the same timestamp arriving
+// after backfill (or a late partial frame) must not regress complete=1 back to
+// 0 or replace final values with partial ones. Complete→complete corrections
+// are still allowed (a restated final bar), and incomplete→incomplete /
+// incomplete→complete updates proceed normally. The guard is the ON CONFLICT
+// WHERE clause below.
 func (CandleRepo) Upsert(ctx context.Context, q Querier, c model.Candle) error {
 	_, err := q.ExecContext(ctx, `
 		INSERT INTO candles (instrument_uid, interval, open, high, low, close, volume, ts, complete)
@@ -25,7 +34,8 @@ func (CandleRepo) Upsert(ctx context.Context, q Querier, c model.Candle) error {
 			low = excluded.low,
 			close = excluded.close,
 			volume = excluded.volume,
-			complete = excluded.complete`,
+			complete = excluded.complete
+		WHERE excluded.complete = 1 OR candles.complete = 0`,
 		string(c.InstrumentUID), c.Interval.String(), c.Open, c.High, c.Low, c.Close, c.Volume, timeText(c.TS), boolToInt(c.Complete),
 	)
 	if err != nil {
@@ -41,7 +51,7 @@ func (CandleRepo) Range(ctx context.Context, q Querier, uid model.InstrumentUID,
 		SELECT instrument_uid, interval, open, high, low, close, volume, ts, complete
 		FROM candles
 		WHERE instrument_uid = ? AND interval = ? AND ts >= ? AND ts <= ?
-		ORDER BY ts ASC`,
+		ORDER BY ts ASC, id ASC`,
 		string(uid), interval.String(), timeText(from), timeText(to),
 	)
 	if err != nil {
@@ -70,7 +80,7 @@ func (CandleRepo) LatestComplete(ctx context.Context, q Querier, uid model.Instr
 		SELECT instrument_uid, interval, open, high, low, close, volume, ts, complete
 		FROM candles
 		WHERE instrument_uid = ? AND interval = ? AND complete = 1
-		ORDER BY ts DESC LIMIT 1`,
+		ORDER BY ts DESC, id DESC LIMIT 1`,
 		string(uid), interval.String(),
 	)
 	c, err = scanCandle(row)

@@ -28,12 +28,54 @@ func (IntentRepo) Insert(ctx context.Context, q Querier, in model.OrderIntent) e
 	return nil
 }
 
-// UpdateState sets the state and updated_at of the intent with the given
-// client order id. The caller is responsible for state-machine validation
-// (model.CanTransition) — this is plain SQL, not a business-rule enforcer.
-func (IntentRepo) UpdateState(ctx context.Context, q Querier, clientOrderID string, state model.IntentState, updatedAt time.Time) error {
-	res, err := q.ExecContext(ctx, `UPDATE order_intents SET state = ?, updated_at = ? WHERE client_order_id = ?`,
-		state.String(), timeText(updatedAt), clientOrderID)
+// IllegalTransitionError reports that a requested intent state change is not a
+// legal edge of the model.OrderIntent state machine (see model.CanTransition).
+// It is a caller bug — the transition would never be valid regardless of the
+// stored state — and in particular covers moving out of a terminal state.
+type IllegalTransitionError struct {
+	ClientOrderID string
+	From          model.IntentState
+	To            model.IntentState
+}
+
+func (e IllegalTransitionError) Error() string {
+	return fmt.Sprintf("sqlite: order intent %s: illegal state transition %s -> %s", e.ClientOrderID, e.From, e.To)
+}
+
+// StateConflictError reports that a compare-and-swap UpdateState found the
+// intent in a different state than the caller expected: the row exists but has
+// moved under the caller (e.g. a concurrent reconciliation), so nothing was
+// written. Distinct from ErrNotFound (no such intent) and from
+// IllegalTransitionError (the transition is never legal).
+type StateConflictError struct {
+	ClientOrderID string
+	Expected      model.IntentState
+	Actual        model.IntentState
+}
+
+func (e StateConflictError) Error() string {
+	return fmt.Sprintf("sqlite: order intent %s: state conflict, expected %s but found %s", e.ClientOrderID, e.Expected, e.Actual)
+}
+
+// UpdateState performs a guarded, compare-and-swap state change on the intent
+// with the given client order id: it advances the row from `from` to `to` only
+// if `from` is the currently stored state and from→to is a legal edge of the
+// intent state machine (model.CanTransition). This makes the state column safe
+// against lost updates — a terminal filled/canceled intent cannot silently
+// regress into the reconciliation set, and two writers racing on the same
+// intent cannot both "win".
+//
+// Errors: IllegalTransitionError if from→to is not a legal edge (including any
+// move out of a terminal state); ErrNotFound if no such intent exists;
+// StateConflictError if the intent exists but is not in `from`.
+func (IntentRepo) UpdateState(ctx context.Context, q Querier, clientOrderID string, from, to model.IntentState, updatedAt time.Time) error {
+	if !model.CanTransition(from, to) {
+		return IllegalTransitionError{ClientOrderID: clientOrderID, From: from, To: to}
+	}
+
+	res, err := q.ExecContext(ctx,
+		`UPDATE order_intents SET state = ?, updated_at = ? WHERE client_order_id = ? AND state = ?`,
+		to.String(), timeText(updatedAt), clientOrderID, from.String())
 	if err != nil {
 		return fmt.Errorf("sqlite: update order intent %s state: %w", clientOrderID, err)
 	}
@@ -42,7 +84,14 @@ func (IntentRepo) UpdateState(ctx context.Context, q Querier, clientOrderID stri
 		return fmt.Errorf("sqlite: update order intent %s state: %w", clientOrderID, err)
 	}
 	if n == 0 {
-		return ErrNotFound
+		// The CAS matched no row: either the intent is gone or its state is no
+		// longer `from`. Read it back to report which, so callers can tell a
+		// missing intent from a stale-state conflict.
+		current, getErr := (IntentRepo{}).Get(ctx, q, clientOrderID)
+		if getErr != nil {
+			return getErr // ErrNotFound, or a real read error
+		}
+		return StateConflictError{ClientOrderID: clientOrderID, Expected: from, Actual: current.State}
 	}
 	return nil
 }
@@ -70,7 +119,7 @@ func (IntentRepo) NonTerminal(ctx context.Context, q Querier) ([]model.OrderInte
 		SELECT client_order_id, decision_id, instrument_uid, side, qty, type, limit_price, time_in_force, state, created_at, updated_at
 		FROM order_intents
 		WHERE state NOT IN (?, ?, ?)
-		ORDER BY created_at ASC`,
+		ORDER BY created_at ASC, client_order_id ASC`,
 		model.IntentFilled.String(), model.IntentCanceled.String(), model.IntentRejected.String(),
 	)
 	if err != nil {

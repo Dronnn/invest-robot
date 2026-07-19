@@ -42,7 +42,9 @@ CREATE TABLE quotes (
     last           TEXT NOT NULL,
     ts             TEXT NOT NULL
 );
-CREATE INDEX idx_quotes_instrument_ts ON quotes (instrument_uid, ts DESC);
+-- id DESC mirrors the "latest" query's ORDER BY ts DESC, id DESC tie-breaker so
+-- equal-ts snapshots resolve deterministically (newest row wins) index-covered.
+CREATE INDEX idx_quotes_instrument_ts ON quotes (instrument_uid, ts DESC, id DESC);
 
 CREATE TABLE feature_snapshots (
     id             INTEGER PRIMARY KEY,
@@ -50,7 +52,7 @@ CREATE TABLE feature_snapshots (
     as_of          TEXT NOT NULL,
     payload        TEXT NOT NULL
 );
-CREATE INDEX idx_feature_snapshots_instrument_asof ON feature_snapshots (instrument_uid, as_of);
+CREATE INDEX idx_feature_snapshots_instrument_asof ON feature_snapshots (instrument_uid, as_of DESC, id DESC);
 
 CREATE TABLE cycles (
     id                   INTEGER PRIMARY KEY,
@@ -63,7 +65,7 @@ CREATE TABLE cycles (
     config_snapshot      TEXT NOT NULL,
     status               TEXT NOT NULL
 );
-CREATE INDEX idx_cycles_started_at ON cycles (started_at);
+CREATE INDEX idx_cycles_started_at ON cycles (started_at DESC, id DESC);
 
 CREATE TABLE decisions (
     id                INTEGER PRIMARY KEY,
@@ -94,16 +96,19 @@ CREATE TABLE llm_calls (
 );
 CREATE INDEX idx_llm_calls_cycle ON llm_calls (cycle_id);
 
+-- CHECK constraints mirror the model enums and the OrderIntent invariants so a
+-- zero-value or corrupt row cannot persist and then fail only when read back
+-- (side/type/tif/state must be known tokens; qty is in lots and is positive).
 CREATE TABLE order_intents (
     client_order_id TEXT PRIMARY KEY,
     decision_id     INTEGER NOT NULL REFERENCES decisions (id),
     instrument_uid  TEXT NOT NULL REFERENCES instruments (uid),
-    side            TEXT NOT NULL,
-    qty             INTEGER NOT NULL,
-    type            TEXT NOT NULL,
+    side            TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+    qty             INTEGER NOT NULL CHECK (qty > 0),
+    type            TEXT NOT NULL CHECK (type IN ('market', 'limit')),
     limit_price     TEXT,
-    time_in_force   TEXT NOT NULL,
-    state           TEXT NOT NULL,
+    time_in_force   TEXT NOT NULL CHECK (time_in_force IN ('day', 'ioc')),
+    state           TEXT NOT NULL CHECK (state IN ('new', 'submitted', 'acked', 'filled', 'canceled', 'rejected', 'unknown')),
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
@@ -130,7 +135,7 @@ CREATE TABLE fills (
     fee             TEXT NOT NULL,
     ts              TEXT NOT NULL
 );
-CREATE INDEX idx_fills_order_intent ON fills (order_intent_id);
+CREATE INDEX idx_fills_order_intent ON fills (order_intent_id, ts ASC, id ASC);
 
 CREATE TABLE positions (
     instrument_uid TEXT PRIMARY KEY REFERENCES instruments (uid),
@@ -149,7 +154,7 @@ CREATE TABLE cash_ledger (
     reason   TEXT NOT NULL,
     ref      TEXT
 );
-CREATE INDEX idx_cash_ledger_ts ON cash_ledger (ts);
+CREATE INDEX idx_cash_ledger_ts ON cash_ledger (ts DESC, id DESC);
 
 CREATE TABLE equity_snapshots (
     id           INTEGER PRIMARY KEY,
@@ -158,7 +163,7 @@ CREATE TABLE equity_snapshots (
     market_value TEXT NOT NULL,
     total        TEXT NOT NULL
 );
-CREATE INDEX idx_equity_snapshots_ts ON equity_snapshots (ts);
+CREATE INDEX idx_equity_snapshots_ts ON equity_snapshots (ts DESC, id DESC);
 
 CREATE TABLE events (
     id      INTEGER PRIMARY KEY,
@@ -167,4 +172,4 @@ CREATE TABLE events (
     code    TEXT NOT NULL,
     payload TEXT
 );
-CREATE INDEX idx_events_ts ON events (ts);
+CREATE INDEX idx_events_ts ON events (ts DESC, id DESC);
