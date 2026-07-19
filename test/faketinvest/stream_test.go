@@ -41,7 +41,7 @@ func decodeFrames(t *testing.T, out string) []streamFrame {
 
 func TestStreamHappyPlayback(t *testing.T) {
 	code, out := invoke(t, map[string]string{"FAKETINVEST_SCENARIO": happyDir},
-		"stream", "marketdata", "--instrument", "SBER@TQBR", "--instrument", "GAZP@TQBR", "--candles=5m", "-o", "json")
+		"stream", "marketdata", "--instrument", "SBER@TQBR", "--instrument", "GAZP@TQBR", "--candles=5m", "--last-price", "-o", "json")
 	if code != exitOK {
 		t.Fatalf("exit = %d, want 0", code)
 	}
@@ -58,6 +58,108 @@ func TestStreamHappyPlayback(t *testing.T) {
 	}
 	if types["candle"] != 2 || types["last_price"] != 2 {
 		t.Errorf("expected 2 candles + 2 last_price, got %v", types)
+	}
+}
+
+// TestStreamSubscriptionFiltering proves the fake actually filters replayed
+// frames instead of dumping the whole script: the happy script carries candle
+// and last_price frames for both SBER and GAZP, but a request that subscribes
+// only to SBER candles must see none of GAZP's frames and none of the
+// last_price frames (last-price was never requested).
+func TestStreamSubscriptionFiltering(t *testing.T) {
+	code, out := invoke(t, map[string]string{"FAKETINVEST_SCENARIO": happyDir},
+		"stream", "marketdata", "--instrument", "SBER@TQBR", "--candles=5m", "-o", "json")
+	if code != exitOK {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	frames := decodeFrames(t, out)
+	var candles, others int
+	for _, f := range frames {
+		switch f.Type {
+		case "candle":
+			candles++
+			var peek struct {
+				InstrumentUID string `json:"instrument_uid"`
+			}
+			_ = json.Unmarshal(f.Data, &peek)
+			if peek.InstrumentUID != "e6123145-9665-43e0-8413-cd61b8aa9b13" {
+				t.Errorf("candle for unsubscribed instrument %q leaked through", peek.InstrumentUID)
+			}
+		case "last_price":
+			t.Errorf("unsubscribed last_price frame leaked through: %+v", f)
+		case "connected":
+		default:
+			others++
+		}
+	}
+	if candles != 1 {
+		t.Errorf("candle count = %d, want 1 (SBER only)", candles)
+	}
+
+	// Requesting an interval the script never emits must filter every candle out.
+	code, out = invoke(t, map[string]string{"FAKETINVEST_SCENARIO": happyDir},
+		"stream", "marketdata", "--instrument", "SBER@TQBR", "--candles=1m", "-o", "json")
+	if code != exitOK {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	for _, f := range decodeFrames(t, out) {
+		if f.Type == "candle" {
+			t.Errorf("candle frame at the wrong interval was not filtered out: %+v", f)
+		}
+	}
+}
+
+// TestStreamSubscriptionValidation mirrors the real CLI's local (no-network)
+// `stream marketdata` validation: at least one --instrument, at least one
+// data-kind flag, a recognized --candles interval, and a recognized
+// --orderbook depth. Every failure is USAGE, exit 2, delivered as a stream
+// error frame (never a bare unary envelope — the stream contract is NDJSON).
+func TestStreamSubscriptionValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		argv []string
+	}{
+		{"no_instrument", []string{"stream", "marketdata", "--candles=5m", "-o", "json"}},
+		{"no_data_kind", []string{"stream", "marketdata", "--instrument", "SBER@TQBR", "-o", "json"}},
+		{"invalid_interval", []string{"stream", "marketdata", "--instrument", "SBER@TQBR", "--candles=7m", "-o", "json"}},
+		{"invalid_depth", []string{"stream", "marketdata", "--instrument", "SBER@TQBR", "--orderbook=7", "-o", "json"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, out := invoke(t, map[string]string{"FAKETINVEST_SCENARIO": happyDir}, tc.argv...)
+			if code != exitUsage {
+				t.Fatalf("exit = %d, want %d; out:\n%s", code, exitUsage, out)
+			}
+			frames := decodeFrames(t, out)
+			if len(frames) != 1 || frames[0].Type != "error" {
+				t.Fatalf("frames = %+v, want a single error frame", frames)
+			}
+			if frames[0].Error == nil || frames[0].Error.Code != "USAGE" {
+				t.Fatalf("error = %+v, want code USAGE", frames[0].Error)
+			}
+		})
+	}
+}
+
+// TestStreamUnknownInstrumentRejected proves an alias (ticker@classcode) that
+// isn't in the scenario's instrument universe is BROKER_REJECTED (exit 5),
+// mirroring the real CLI's resolveAll -> classifyResolveErr path (the same
+// classification the fake already gives an unknown instrument on every unary
+// command) — grounded in reading cmd/tinvest/instruments.go's
+// classifyResolveErr and internal/render/errors.go's NotFound mapping in the
+// sibling tinvest repo, not merely assumed; see README.md.
+func TestStreamUnknownInstrumentRejected(t *testing.T) {
+	code, out := invoke(t, map[string]string{"FAKETINVEST_SCENARIO": happyDir},
+		"stream", "marketdata", "--instrument", "NOPE@TQBR", "--candles=5m", "-o", "json")
+	if code != exitRejected {
+		t.Fatalf("exit = %d, want %d; out:\n%s", code, exitRejected, out)
+	}
+	frames := decodeFrames(t, out)
+	if len(frames) != 1 || frames[0].Type != "error" {
+		t.Fatalf("frames = %+v, want a single error frame", frames)
+	}
+	if frames[0].Error == nil || frames[0].Error.Code != "BROKER_REJECTED" {
+		t.Fatalf("error = %+v, want code BROKER_REJECTED", frames[0].Error)
 	}
 }
 
@@ -110,6 +212,8 @@ func TestStreamGracefulShutdown(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "scenario.toml"), `
 account_id = "acc"
+[[instruments]]
+uid = "e6123145-9665-43e0-8413-cd61b8aa9b13"
 [stream]
 script = "s.json"
 shutdown_time = "2026-07-19T10:05:00Z"
@@ -130,7 +234,7 @@ shutdown_time = "2026-07-19T10:05:00Z"
 	var stdout bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- run(ctx, []string{"stream", "marketdata", "-o", "json"}, env, &stdout, &bytes.Buffer{})
+		done <- run(ctx, []string{"stream", "marketdata", "--instrument", "e6123145-9665-43e0-8413-cd61b8aa9b13", "--candles=5m", "-o", "json"}, env, &stdout, &bytes.Buffer{})
 	}()
 	cancel()
 
@@ -172,6 +276,8 @@ func TestBinarySignalShutdown(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "scenario.toml"), `
 account_id = "acc"
+[[instruments]]
+uid = "e6123145-9665-43e0-8413-cd61b8aa9b13"
 [stream]
 script = "s.json"
 shutdown_time = "2026-07-19T10:05:00Z"
@@ -181,7 +287,7 @@ shutdown_time = "2026-07-19T10:05:00Z"
   {"type":"candle","time":"2026-07-19T10:00:00Z","delay_ms":30000,"data":{"candle_time":"2026-07-19T10:00:00Z"}}
 ]`)
 
-	cmd := exec.Command(bin, "stream", "marketdata", "-o", "json")
+	cmd := exec.Command(bin, "stream", "marketdata", "--instrument", "e6123145-9665-43e0-8413-cd61b8aa9b13", "--candles=5m", "-o", "json")
 	cmd.Env = append(os.Environ(), "FAKETINVEST_SCENARIO="+dir)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

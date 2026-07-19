@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -164,6 +165,33 @@ func loadScenario(dir string) (*scenario, error) {
 func (s *scenario) resolveInstrument(id string) (*instrumentSpec, bool) {
 	inst, ok := s.index[id]
 	return inst, ok
+}
+
+// uidPattern matches the real CLI's instrument_uid shape (8-4-4-4-12 hex),
+// mirroring the sibling tinvest repo's internal/broker/instruments.Classify.
+var uidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// resolveSubscriptionUID resolves a `stream marketdata` --instrument value to
+// the UID used to tag replayed frames. A ticker@classcode or FIGI alias must
+// be registered in the scenario's [[instruments]] universe to resolve — an
+// unregistered alias is a genuinely unknown instrument (ok=false), mirroring
+// the real CLI's resolveAll -> BROKER_REJECTED path. A syntactically valid
+// bare uid "self-resolves" even when unregistered: many minimal stream-only
+// scenarios (this fake's own ad hoc tests, and the robot's) author a stream
+// script against a raw uid without also declaring a full [[instruments]]
+// entry, and the real broker would still open such a subscription (it only
+// fails at delivery, not at request time) — this fake has no delivery-time
+// failure mode, so treating a well-formed uid as its own resolution keeps
+// those minimal scenarios working without forcing every stream test to carry
+// a redundant instrument block.
+func (s *scenario) resolveSubscriptionUID(id string) (string, bool) {
+	if inst, ok := s.resolveInstrument(id); ok {
+		return inst.UID, true
+	}
+	if uidPattern.MatchString(id) {
+		return id, true
+	}
+	return "", false
 }
 
 // readFixture loads a fixture file relative to the scenario directory and

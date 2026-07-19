@@ -1,6 +1,6 @@
 [
   { "type": "connected", "time": "2026-07-19T09:00:00Z", "data": { "attempt": 1, "subscriptions": 1 } },
-  { "type": "candle", "time": "2026-07-19T09:00:00Z", "data": {
+  { "type": "candle", "time": "2026-07-19T09:00:00.276000000Z", "data": {
       "instrument_uid": "e6123145-9665-43e0-8413-cd61b8aa9b13", "ticker": "SBER", "class_code": "TQBR", "figi": "BBG004730N88",
       "interval": "CANDLE_INTERVAL_5_MIN",
       "open": { "units": "270", "nano": 0, "value": "270" },
@@ -9,7 +9,7 @@
       "close": { "units": "270", "nano": 500000000, "value": "270.5" },
       "volume": "1400", "volume_buy": "800", "volume_sell": "600",
       "candle_time": "2026-07-19T09:00:00Z", "source": "CANDLE_SOURCE_EXCHANGE" } },
-  { "type": "candle", "time": "2026-07-19T09:05:00Z", "data": {
+  { "type": "candle", "time": "2026-07-19T09:05:00.194000000Z", "data": {
       "instrument_uid": "e6123145-9665-43e0-8413-cd61b8aa9b13", "ticker": "SBER", "class_code": "TQBR", "figi": "BBG004730N88",
       "interval": "CANDLE_INTERVAL_5_MIN",
       "open": { "units": "270", "nano": 500000000, "value": "270.5" },
@@ -20,7 +20,7 @@
       "candle_time": "2026-07-19T09:05:00Z", "source": "CANDLE_SOURCE_EXCHANGE" } },
   { "type": "disconnected", "time": "2026-07-19T09:06:00Z", "data": { "attempt": 1, "subscriptions": 1, "reason": "upstream reset" } },
   { "type": "connected", "time": "2026-07-19T09:12:00Z", "data": { "attempt": 2, "subscriptions": 1 } },
-  { "type": "candle", "time": "2026-07-19T09:15:00Z", "data": {
+  { "type": "candle", "time": "2026-07-19T09:15:00.408000000Z", "data": {
       "instrument_uid": "e6123145-9665-43e0-8413-cd61b8aa9b13", "ticker": "SBER", "class_code": "TQBR", "figi": "BBG004730N88",
       "interval": "CANDLE_INTERVAL_5_MIN",
       "open": { "units": "271", "nano": 0, "value": "271" },
@@ -29,7 +29,7 @@
       "close": { "units": "271", "nano": 200000000, "value": "271.2" },
       "volume": "1100", "volume_buy": "600", "volume_sell": "500",
       "candle_time": "2026-07-19T09:15:00Z", "source": "CANDLE_SOURCE_EXCHANGE" } },
-  { "type": "last_price", "time": "2026-07-19T09:15:30Z", "data": {
+  { "type": "last_price", "time": "2026-07-19T09:15:30.087000000Z", "data": {
       "instrument_uid": "e6123145-9665-43e0-8413-cd61b8aa9b13", "ticker": "SBER", "class_code": "TQBR", "figi": "BBG004730N88",
       "price": { "units": "271", "nano": 200000000, "value": "271.2" }, "price_type": "LAST_PRICE_EXCHANGE", "time": "2026-07-19T09:15:30Z" } },
   { "exit": 0 }

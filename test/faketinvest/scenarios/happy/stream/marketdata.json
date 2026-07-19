@@ -1,6 +1,6 @@
 [
   { "type": "connected", "time": "2026-07-19T10:00:00Z", "data": { "attempt": 1, "subscriptions": 2 } },
-  { "type": "candle", "time": "2026-07-19T10:00:00Z", "data": {
+  { "type": "candle", "time": "2026-07-19T10:00:00.342000000Z", "data": {
       "instrument_uid": "e6123145-9665-43e0-8413-cd61b8aa9b13", "ticker": "SBER", "class_code": "TQBR", "figi": "BBG004730N88",
       "interval": "CANDLE_INTERVAL_5_MIN",
       "open": { "units": "270", "nano": 500000000, "value": "270.5" },
@@ -9,10 +9,10 @@
       "close": { "units": "270", "nano": 800000000, "value": "270.8" },
       "volume": "1200", "volume_buy": "700", "volume_sell": "500",
       "candle_time": "2026-07-19T10:00:00Z", "last_trade_time": "2026-07-19T10:04:59Z", "source": "CANDLE_SOURCE_EXCHANGE" } },
-  { "type": "last_price", "time": "2026-07-19T10:00:30Z", "data": {
+  { "type": "last_price", "time": "2026-07-19T10:00:30.118000000Z", "data": {
       "instrument_uid": "e6123145-9665-43e0-8413-cd61b8aa9b13", "ticker": "SBER", "class_code": "TQBR", "figi": "BBG004730N88",
       "price": { "units": "270", "nano": 800000000, "value": "270.8" }, "price_type": "LAST_PRICE_EXCHANGE", "time": "2026-07-19T10:00:30Z" } },
-  { "type": "candle", "time": "2026-07-19T10:00:00Z", "data": {
+  { "type": "candle", "time": "2026-07-19T10:00:00.512000000Z", "data": {
       "instrument_uid": "962e2a95-02a9-4171-abd7-aa198dbe643a", "ticker": "GAZP", "class_code": "TQBR", "figi": "BBG004730RP0",
       "interval": "CANDLE_INTERVAL_5_MIN",
       "open": { "units": "128", "nano": 400000000, "value": "128.4" },
@@ -21,7 +21,7 @@
       "close": { "units": "128", "nano": 700000000, "value": "128.7" },
       "volume": "2600", "volume_buy": "1400", "volume_sell": "1200",
       "candle_time": "2026-07-19T10:00:00Z", "last_trade_time": "2026-07-19T10:04:58Z", "source": "CANDLE_SOURCE_EXCHANGE" } },
-  { "type": "last_price", "time": "2026-07-19T10:00:31Z", "data": {
+  { "type": "last_price", "time": "2026-07-19T10:00:31.203000000Z", "data": {
       "instrument_uid": "962e2a95-02a9-4171-abd7-aa198dbe643a", "ticker": "GAZP", "class_code": "TQBR", "figi": "BBG004730RP0",
       "price": { "units": "128", "nano": 700000000, "value": "128.7" }, "price_type": "LAST_PRICE_EXCHANGE", "time": "2026-07-19T10:00:31Z" } }
 ]
