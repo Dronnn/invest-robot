@@ -1,6 +1,7 @@
 package risk
 
 import (
+	"math"
 	"reflect"
 	"sync"
 	"testing"
@@ -424,6 +425,64 @@ func TestPositionNotional(t *testing.T) {
 			t.Fatalf("Allowed = %+v, want empty when no price is available", res.Allowed)
 		}
 	})
+
+	t.Run("strips rather than wraps when the existing position overflows int64 shares", func(t *testing.T) {
+		// QtyLots * Lot overflows int64 (well past MaxInt64), which a raw
+		// multiply would silently wrap instead of erroring. If that wrapped
+		// value were trusted, it could present as a small or negative
+		// notional and let the buy sail through a limit it should never
+		// have passed.
+		limits := wideOpenLimits()
+		state := wideOpenState()
+		state.Positions[uidA] = Position{QtyLots: math.MaxInt64 / 2, LastPrice: model.MustDecimal("100")}
+		state.Instruments[uidA] = instrument(uidA, "AAA", 4) // *4 overflows int64
+
+		res := Check([]model.Decision{buy(uidA, 1)}, state, limits)
+
+		if len(res.Allowed) != 0 {
+			t.Fatalf("Allowed = %+v, want empty: the existing position can't be valued without overflowing", res.Allowed)
+		}
+	})
+
+	t.Run("strips on a negative quote price instead of treating it as usable", func(t *testing.T) {
+		// A negative price is not "missing" (an IsZero-only guard would
+		// have let it through); it must be rejected outright, since a
+		// negative notional would net down a budget instead of consuming
+		// it -- silently widening what the limit permits.
+		limits := wideOpenLimits()
+		state := wideOpenState()
+		state.Quotes[uidA] = model.Quote{Ask: model.MustDecimal("-100"), Last: model.MustDecimal("-100")}
+
+		res := Check([]model.Decision{buy(uidA, 1)}, state, limits)
+
+		if len(res.Allowed) != 0 {
+			t.Fatalf("Allowed = %+v, want empty for a negative quote price", res.Allowed)
+		}
+	})
+
+	t.Run("strips on a non-positive instrument lot size", func(t *testing.T) {
+		limits := wideOpenLimits()
+		state := wideOpenState()
+		state.Instruments[uidA] = instrument(uidA, "AAA", 0) // corrupt/unset lot size
+
+		res := Check([]model.Decision{buy(uidA, 1)}, state, limits)
+
+		if len(res.Allowed) != 0 {
+			t.Fatalf("Allowed = %+v, want empty for a non-positive lot size", res.Allowed)
+		}
+	})
+
+	t.Run("a non-positive limit price is not rescued by the market price", func(t *testing.T) {
+		// uidA has a perfectly good market quote in wideOpenState; a limit
+		// order with an invalid limit price must still be stripped, not
+		// silently repriced at the market.
+		limits := wideOpenLimits()
+		res := Check([]model.Decision{limitBuy(uidA, 1, "0")}, wideOpenState(), limits)
+
+		if len(res.Allowed) != 0 {
+			t.Fatalf("Allowed = %+v, want empty: a zero limit price must not fall back to the market quote", res.Allowed)
+		}
+	})
 }
 
 // allowedQty2 returns the decision at position i of allowed (helper for
@@ -596,6 +655,31 @@ func TestCashFloor(t *testing.T) {
 			t.Fatalf("second buy qty=%d ok=%v, want shrunk to 4", qB, okB)
 		}
 	})
+}
+
+// --- overflow fail-closed on the candidate buy side --------------------------
+
+func TestCheck_OverflowingCandidateQuantityDoesNotBypassNotional(t *testing.T) {
+	// The candidate buy itself (not an existing position) carries a lot count
+	// whose lots*lot product wraps int64 to zero (2^62 * 4 == 2^64). The old
+	// raw multiply booked that as a zero notional, so the buy sailed past
+	// every monetary limit unchanged.
+	limits := wideOpenLimits()
+	limits.MaxPositionNotional = "1000"
+	state := wideOpenState()
+	state.Instruments[uidA] = instrument(uidA, "AAA", 4)
+	const wrapping int64 = 1 << 62
+	res := Check([]model.Decision{buy(uidA, wrapping)}, state, limits)
+
+	q, ok := allowedQty(t, res.Allowed, uidA)
+	if ok && q == wrapping {
+		t.Fatalf("overflowing buy passed unchanged at qty %d: notional check was bypassed", q)
+	}
+	// Anything that survives must genuinely fit: price 100, lot 4 => at most 2
+	// lots (800) fit within a 1000 notional; 3 lots (1200) do not.
+	if ok && q > 2 {
+		t.Fatalf("allowed qty %d exceeds what fits the notional limit; want <= 2 or stripped", q)
+	}
 }
 
 // --- rule ordering interactions ---------------------------------------------
