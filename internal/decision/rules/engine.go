@@ -59,12 +59,29 @@ func (e *Engine) Decide(ctx context.Context, req decision.Request) (decision.Res
 		positions[p.UID] = p
 	}
 
+	// An instrument with a non-terminal order intent already has an order
+	// working; proposing another this cycle would double up on a resting
+	// order — the classic bug of re-buying every bullish cycle while the first
+	// buy still rests. Suppress any new action for such instruments and hold
+	// until the working intent resolves (fills, cancels, or is rejected).
+	working := make(map[model.InstrumentUID]bool, len(req.OpenIntents))
+	for _, oi := range req.OpenIntents {
+		if !oi.State.IsTerminal() {
+			working[oi.InstrumentUID] = true
+		}
+	}
+
 	actions := make([]model.Decision, 0, len(req.Instruments))
 	var skipped []string
 
 	for _, instr := range req.Instruments {
 		if instr.DataFreshness > e.params.MaxDataAge {
 			skipped = append(skipped, fmt.Sprintf("%s: stale data (%s > %s)", instr.Ticker, instr.DataFreshness, e.params.MaxDataAge))
+			continue
+		}
+
+		if working[instr.UID] {
+			actions = append(actions, e.buildHold(instr, "an order intent is already working for this instrument"))
 			continue
 		}
 

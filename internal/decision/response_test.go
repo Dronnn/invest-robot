@@ -62,6 +62,83 @@ func TestResponse_JSONRoundTrip(t *testing.T) {
 	}
 }
 
+// TestResponse_WireFormatIsSnakeCase pins the exact JSON keys of the action
+// wire contract: the LLM engines depend on stable snake_case field names, so a
+// silent rename to Go field names must fail this test.
+func TestResponse_WireFormatIsSnakeCase(t *testing.T) {
+	limit := model.MustDecimal("100.50")
+	resp := Response{
+		Actions: []model.Decision{
+			{
+				InstrumentUID: "SBER-UID",
+				Action:        model.ActionBuy,
+				Quantity:      3,
+				OrderType:     model.OrderLimit,
+				LimitPrice:    &limit,
+				TimeInForce:   model.TIFDay,
+				Rationale:     "trend entry",
+				Confidence:    0.72,
+			},
+		},
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var envelope struct {
+		Actions []map[string]json.RawMessage `json:"actions"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if len(envelope.Actions) != 1 {
+		t.Fatalf("actions len = %d, want 1 (%s)", len(envelope.Actions), raw)
+	}
+	action := envelope.Actions[0]
+	wantKeys := []string{"instrument_uid", "action", "quantity", "order_type", "limit_price", "time_in_force", "rationale", "confidence"}
+	for _, k := range wantKeys {
+		if _, ok := action[k]; !ok {
+			t.Errorf("action missing snake_case key %q: %s", k, raw)
+		}
+	}
+	// No Go-cased field names must leak onto the wire.
+	for _, k := range []string{"InstrumentUID", "Action", "OrderType", "LimitPrice", "TimeInForce"} {
+		if _, ok := action[k]; ok {
+			t.Errorf("action carries Go-cased key %q; the wire contract is snake_case: %s", k, raw)
+		}
+	}
+}
+
+// TestResponse_MarketOrderOmitsLimitPrice confirms a market order carries no
+// limit_price key on the wire, and the omission round-trips back to a nil
+// LimitPrice.
+func TestResponse_MarketOrderOmitsLimitPrice(t *testing.T) {
+	resp := Response{Actions: []model.Decision{{
+		InstrumentUID: "GAZP-UID", Action: model.ActionHold, OrderType: model.OrderMarket, TimeInForce: model.TIFDay,
+	}}}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var envelope struct {
+		Actions []map[string]json.RawMessage `json:"actions"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := envelope.Actions[0]["limit_price"]; ok {
+		t.Errorf("market order should omit limit_price: %s", raw)
+	}
+	var back Response
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal round trip: %v", err)
+	}
+	if back.Actions[0].LimitPrice != nil {
+		t.Errorf("round-tripped LimitPrice = %v, want nil", back.Actions[0].LimitPrice)
+	}
+}
+
 func TestResponse_NotesOmittedWhenEmpty(t *testing.T) {
 	resp := Response{Actions: []model.Decision{}}
 	raw, err := json.Marshal(resp)

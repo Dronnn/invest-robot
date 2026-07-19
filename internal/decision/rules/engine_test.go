@@ -101,6 +101,59 @@ func TestDecide_NoEntryWhenAlreadyPositioned(t *testing.T) {
 	}
 }
 
+func TestDecide_SuppressesEntryWhileIntentOpen(t *testing.T) {
+	req := baseRequest()
+	req.Instruments = []decision.InstrumentContext{
+		instrumentFixture("SBER-UID", 251, 245, 60, 2.5, "250"), // bullish entry signal
+	}
+	// A resting (acked) buy intent for the same instrument: a fresh entry must
+	// be suppressed rather than stacking a second buy on the working order.
+	req.OpenIntents = []decision.IntentView{{
+		ClientOrderID: "co-1", InstrumentUID: "SBER-UID", Side: model.SideBuy, Qty: 3,
+		Type: model.OrderMarket, TimeInForce: model.TIFDay, State: model.IntentAcked,
+	}}
+
+	got := decideOne(t, req)
+	if got.Action != model.ActionHold {
+		t.Fatalf("Action = %v, want hold while an intent is working (rationale=%q)", got.Action, got.Rationale)
+	}
+}
+
+func TestDecide_SuppressesExitWhileIntentOpen(t *testing.T) {
+	req := baseRequest()
+	req.Portfolio.Positions = []decision.PositionView{{UID: "SBER-UID", Qty: 5}}
+	req.Instruments = []decision.InstrumentContext{
+		instrumentFixture("SBER-UID", 240, 245, 55, 2.5, "250"), // bearish: would normally close
+	}
+	req.OpenIntents = []decision.IntentView{{
+		ClientOrderID: "co-2", InstrumentUID: "SBER-UID", Side: model.SideSell, Qty: 5,
+		Type: model.OrderMarket, TimeInForce: model.TIFDay, State: model.IntentSubmitted,
+	}}
+
+	got := decideOne(t, req)
+	if got.Action != model.ActionHold {
+		t.Fatalf("Action = %v, want hold while an exit intent is working (rationale=%q)", got.Action, got.Rationale)
+	}
+}
+
+func TestDecide_TerminalIntentDoesNotSuppress(t *testing.T) {
+	req := baseRequest()
+	req.Instruments = []decision.InstrumentContext{
+		instrumentFixture("SBER-UID", 251, 245, 60, 2.5, "250"),
+	}
+	// A filled (terminal) intent is not "working" and must not suppress a fresh
+	// signal — otherwise every past order would block the instrument forever.
+	req.OpenIntents = []decision.IntentView{{
+		ClientOrderID: "co-3", InstrumentUID: "SBER-UID", Side: model.SideBuy, Qty: 3,
+		Type: model.OrderMarket, TimeInForce: model.TIFDay, State: model.IntentFilled,
+	}}
+
+	got := decideOne(t, req)
+	if got.Action != model.ActionBuy {
+		t.Fatalf("Action = %v, want buy (a terminal intent must not suppress) rationale=%q", got.Action, got.Rationale)
+	}
+}
+
 func TestDecide_NoEntryWhenRSIOutsideBand(t *testing.T) {
 	cases := []struct {
 		name string
