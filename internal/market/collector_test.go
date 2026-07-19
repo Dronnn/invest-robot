@@ -131,7 +131,10 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-const uidSBER = "e6123145-9665-43e0-8413-cd61b8aa9b13"
+const (
+	uidSBER = "e6123145-9665-43e0-8413-cd61b8aa9b13"
+	uidGAZP = "962e2a95-02a9-4171-abd7-aa198dbe643a"
+)
 
 func bar(ts, o, h, l, c, vol string, complete bool) string {
 	return `{"time":"` + ts + `","open":{"value":"` + o + `"},"high":{"value":"` + h +
@@ -316,6 +319,69 @@ func TestGapEventTriggersBackfill(t *testing.T) {
 			time.Date(2026, 7, 19, 9, 10, 0, 0, time.UTC), time.Date(2026, 7, 19, 9, 10, 0, 0, time.UTC))
 		return err == nil && len(got) == 1
 	})
+}
+
+// TestWholeSubscriptionGapUsesPerInstrumentWatermark proves a whole-subscription
+// gap (zero From) backfills each instrument from its own stored watermark, not a
+// single global candle time — so a lagging instrument is not skipped forward to
+// a newer instrument's timestamp.
+func TestWholeSubscriptionGapUsesPerInstrumentWatermark(t *testing.T) {
+	b := newFakeBroker()
+	b.addInstrument("SBER@TQBR", uidSBER, "SBER")
+	b.addInstrument("GAZP@TQBR", uidGAZP, "GAZP")
+
+	var mu sync.Mutex
+	froms := map[string][]time.Time{}
+	b.setCandles(func(id string, from, _ time.Time) (tinvestcli.CandlesResult, error) {
+		mu.Lock()
+		froms[id] = append(froms[id], from)
+		mu.Unlock()
+		switch id {
+		case uidSBER: // latest complete bar at 09:05
+			return mustCandles(t, `{"instrument_uid":"`+uidSBER+`","interval":"5m","candles":[`+
+				bar("2026-07-19T09:05:00Z", "270", "271", "269", "270.5", "100", true)+`]}`), nil
+		case uidGAZP: // latest complete bar at 09:15 (10 minutes ahead of SBER)
+			return mustCandles(t, `{"instrument_uid":"`+uidGAZP+`","interval":"5m","candles":[`+
+				bar("2026-07-19T09:15:00Z", "128", "129", "127", "128.5", "100", true)+`]}`), nil
+		}
+		return tinvestcli.CandlesResult{}, nil
+	})
+
+	_, s := tempStore(t)
+	c, _ := market.New(deps(b, s, clock.Real()), market.Config{
+		Universe: []string{"SBER@TQBR", "GAZP@TQBR"}, Interval: model.Interval5m,
+	})
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+	h := <-b.handles
+
+	waitFor(t, "startup watermarks set", func() bool {
+		hh := c.Health().Instruments
+		return !hh[uidSBER].CandleWatermark.IsZero() && !hh[uidGAZP].CandleWatermark.IsZero()
+	})
+	mu.Lock()
+	froms = map[string][]time.Time{} // discard the startup backfill calls
+	mu.Unlock()
+
+	h.feed(tinvestcli.GapEvent{}) // whole-subscription gap, zero From
+
+	waitFor(t, "per-instrument gap backfill", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(froms[uidSBER]) >= 1 && len(froms[uidGAZP]) >= 1
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	wantSBER := time.Date(2026, 7, 19, 9, 10, 0, 0, time.UTC) // 09:05 + 5m
+	wantGAZP := time.Date(2026, 7, 19, 9, 20, 0, 0, time.UTC) // 09:15 + 5m
+	if !froms[uidSBER][0].Equal(wantSBER) {
+		t.Fatalf("SBER gap backfill from = %v, want its own watermark %v", froms[uidSBER][0], wantSBER)
+	}
+	if !froms[uidGAZP][0].Equal(wantGAZP) {
+		t.Fatalf("GAZP gap backfill from = %v, want its own watermark %v (not a shared global max)", froms[uidGAZP][0], wantGAZP)
+	}
 }
 
 func TestQuoteFreshnessAndHealth(t *testing.T) {

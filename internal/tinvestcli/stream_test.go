@@ -232,6 +232,19 @@ func TestStreamHostileGapAndRestart(t *testing.T) {
 	if countConnectedAttempt1(got) < 2 {
 		t.Fatalf("expected a supervised restart (>=2 connected@1), got: %s", kinds(got))
 	}
+	// Disconnect/exit gaps are whole-subscription with a zero From: each
+	// instrument lags at its own point, so the collector must backfill each
+	// from its own watermark, never a single global candle time.
+	for _, e := range got {
+		if g, ok := e.(GapEvent); ok {
+			if g.InstrumentUID != "" {
+				t.Fatalf("stream-wide gap should carry no instrument, got %q", g.InstrumentUID)
+			}
+			if !g.From.IsZero() {
+				t.Fatalf("stream-wide gap From = %v, want zero (per-instrument watermark)", g.From)
+			}
+		}
+	}
 }
 
 func TestStreamCircuitBreaker(t *testing.T) {

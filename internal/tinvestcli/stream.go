@@ -50,11 +50,10 @@ type Stream struct {
 	closeOnce sync.Once
 	wake      chan struct{} // buffered(1): signals the pump that the queue changed
 
-	mu             sync.Mutex
-	queue          []Event // FIFO delivery queue drained by the pump
-	finished       bool    // set once when the supervisor has stopped producing
-	terminal       *StreamDownError
-	lastCandleTime time.Time
+	mu       sync.Mutex
+	queue    []Event // FIFO delivery queue drained by the pump
+	finished bool    // set once when the supervisor has stopped producing
+	terminal *StreamDownError
 }
 
 // Events is the delivery channel. It is closed when the stream ends.
@@ -157,8 +156,10 @@ func (s *Stream) supervise(ctx context.Context, argv []string) {
 		}
 
 		// Unexpected exit: candles after the last one may be missing, so emit a
-		// gap for the collector to backfill, then restart.
-		s.deliverGap(GapEvent{From: s.gapFrom(start), Reason: "stream exited unexpectedly"})
+		// whole-subscription gap with a zero From. Each instrument lags at its
+		// own point, so the collector backfills each from its own stored
+		// watermark rather than a single global one.
+		s.deliverGap(GapEvent{Reason: "stream exited unexpectedly"})
 		attempts++
 		if dur < s.client.cfg.StreamMinHealthyRun {
 			consecutiveFast++
@@ -341,9 +342,10 @@ func (s *Stream) dispatch(f wireStreamFrame, lastErr **BrokerError) error {
 			Final:         lc.Final,
 		})
 		// A non-shutdown disconnect means data may have been missed while the
-		// feed was down: emit a gap so the collector backfills.
+		// feed was down: emit a whole-subscription gap with a zero From so the
+		// collector backfills each instrument from its own stored watermark.
 		if f.Type == string(StatusDisconnected) && lc.Reason != "shutdown" && !lc.Final {
-			s.deliverGap(GapEvent{From: s.gapFrom(f.Time), Reason: "stream disconnected: " + lc.Reason})
+			s.deliverGap(GapEvent{Reason: "stream disconnected: " + lc.Reason})
 		}
 	}
 	return nil
@@ -458,12 +460,10 @@ func (s *Stream) finish(term *StreamDownError) {
 
 func (s *Stream) deliverCandle(ev CandleEvent) {
 	s.mu.Lock()
-	if ev.CandleTime.After(s.lastCandleTime) {
-		s.lastCandleTime = ev.CandleTime
-	}
 	if len(s.queue) >= s.client.cfg.StreamQueueSize {
-		// A candle is never silently dropped: record it as a gap to backfill.
-		s.mergeGapLocked(GapEvent{From: ev.CandleTime, Reason: "candle dropped: queue full"})
+		// A candle is never silently dropped: record a per-instrument gap from
+		// this bar's time so only this instrument is backfilled.
+		s.mergeGapLocked(GapEvent{InstrumentUID: ev.InstrumentUID, From: ev.CandleTime, Reason: "candle dropped: queue full"})
 	} else {
 		s.queue = append(s.queue, ev)
 	}
@@ -540,17 +540,6 @@ func mergeGap(dst, ev GapEvent) GapEvent {
 		dst.Reason = ev.Reason
 	}
 	return dst
-}
-
-// gapFrom returns the earliest point a gap should start from: the last observed
-// candle time, or the given fallback when no candle has been seen.
-func (s *Stream) gapFrom(fallback time.Time) time.Time {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.lastCandleTime.IsZero() {
-		return fallback.UTC()
-	}
-	return s.lastCandleTime
 }
 
 // sleepBackoff waits a jittered exponential backoff, returning false if the
