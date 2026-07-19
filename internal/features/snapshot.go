@@ -2,6 +2,7 @@ package features
 
 import (
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/Dronnn/invest-robot/internal/model"
@@ -69,16 +70,29 @@ func (p Params) validate() error {
 type EMATrend string
 
 const (
-	EMABullish EMATrend = "bullish" // fast EMA above slow EMA
-	EMABearish EMATrend = "bearish" // fast EMA below slow EMA
-	EMAFlat    EMATrend = "flat"    // fast EMA equal to slow EMA
+	EMABullish EMATrend = "bullish" // fast EMA above slow EMA, beyond the deadband
+	EMABearish EMATrend = "bearish" // fast EMA below slow EMA, beyond the deadband
+	EMAFlat    EMATrend = "flat"    // fast and slow EMA within the deadband
 )
 
+// emaTrendDeadband is the half-width of the "flat" zone around equal EMAs,
+// expressed as a fraction of the larger EMA magnitude. A mathematically flat
+// price series does not yield exactly equal fast and slow EMAs: the two use
+// different smoothing factors, so floating-point accumulation leaves a gap on
+// the order of 1e-13 relative. A strict > / < comparison would read that noise
+// as a bullish or bearish crossover. Any gap narrower than this fraction is
+// treated as flat; a genuine crossover separates the EMAs by many orders of
+// magnitude more, so real signals are unaffected.
+const emaTrendDeadband = 1e-9
+
 func classifyEMATrend(fast, slow float64) EMATrend {
+	// Scale the deadband by the larger magnitude (floored at 1) so it is a
+	// relative tolerance for normal prices and an absolute one near zero.
+	tolerance := emaTrendDeadband * math.Max(math.Max(math.Abs(fast), math.Abs(slow)), 1)
 	switch {
-	case fast > slow:
+	case fast-slow > tolerance:
 		return EMABullish
-	case fast < slow:
+	case slow-fast > tolerance:
 		return EMABearish
 	default:
 		return EMAFlat
@@ -147,6 +161,17 @@ type Snapshot struct {
 func Build(uid model.InstrumentUID, interval model.CandleInterval, candles []model.Candle, params Params) (Snapshot, error) {
 	if err := params.validate(); err != nil {
 		return Snapshot{}, err
+	}
+	// Every candle must belong to the instrument/interval the snapshot claims:
+	// an upstream assembly or grouping error that mixed in another instrument's
+	// bars would otherwise attach the wrong indicators to an order decision.
+	for i := range candles {
+		if candles[i].InstrumentUID != uid {
+			return Snapshot{}, ErrCandleMismatch{Index: i, Field: "instrument_uid", Want: string(uid), Got: string(candles[i].InstrumentUID)}
+		}
+		if candles[i].Interval != interval {
+			return Snapshot{}, ErrCandleMismatch{Index: i, Field: "interval", Want: interval.String(), Got: candles[i].Interval.String()}
+		}
 	}
 	if required := params.requiredCandles(); len(candles) < required {
 		return Snapshot{}, ErrInsufficientData{Required: required, Got: len(candles)}
