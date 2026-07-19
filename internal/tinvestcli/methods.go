@@ -130,7 +130,7 @@ func (c *Client) OrderbookGet(ctx context.Context, id string, depth int) (Orderb
 
 // PortfolioGet returns the account portfolio.
 func (c *Client) PortfolioGet(ctx context.Context, account string) (Portfolio, error) {
-	raw, _, err := c.call(ctx, callSpec{grp: groupPortfolio, argv: accountArgv("portfolio", "get", account), timeout: c.cfg.Timeout, read: true})
+	raw, _, err := c.call(ctx, callSpec{grp: groupOperations, argv: accountArgv("portfolio", "get", account), timeout: c.cfg.Timeout, read: true})
 	if err != nil {
 		return Portfolio{}, err
 	}
@@ -145,7 +145,7 @@ func (c *Client) PortfolioGet(ctx context.Context, account string) (Portfolio, e
 
 // PositionsGet returns the account's money and security balances.
 func (c *Client) PositionsGet(ctx context.Context, account string) (Positions, error) {
-	raw, _, err := c.call(ctx, callSpec{grp: groupPortfolio, argv: accountArgv("positions", "get", account), timeout: c.cfg.Timeout, read: true})
+	raw, _, err := c.call(ctx, callSpec{grp: groupOperations, argv: accountArgv("positions", "get", account), timeout: c.cfg.Timeout, read: true})
 	if err != nil {
 		return Positions{}, err
 	}

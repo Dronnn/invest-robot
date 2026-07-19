@@ -522,6 +522,41 @@ func TestOrdersGetAndListDecode(t *testing.T) {
 	}
 }
 
+// TestOperationsServiceSerialized proves portfolio and operations-list calls
+// serialize under one method-group lock: they share the real broker's
+// OperationsService rate budget, so with a per-call fake latency the two must
+// run one at a time (total >= two latencies), never concurrently.
+func TestOperationsServiceSerialized(t *testing.T) {
+	const latency = 150 * time.Millisecond
+	dir := writeScenario(t, map[string]string{
+		"scenario.toml": "account_id = \"test-ops\"\n" +
+			"default_latency_ms = 150\n" +
+			"[responses]\nportfolio = \"portfolio.json\"\noperations = \"operations.json\"\n",
+		"portfolio.json":  `{"account_id":"test-ops","total_amount_portfolio":{"value":"1","currency":"rub"},"positions":[]}`,
+		"operations.json": `{"operations":[],"next_cursor":""}`,
+	})
+	c := newClient(t, dir, t.TempDir(), nil)
+	ctx := context.Background()
+
+	start := time.Now()
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+	go func() { defer wg.Done(); _, errs[0] = c.PortfolioGet(ctx, "test-ops") }()
+	go func() { defer wg.Done(); _, errs[1] = c.OperationsList(ctx, "test-ops", "", 0) }()
+	wg.Wait()
+	elapsed := time.Since(start)
+
+	for i, e := range errs {
+		if e != nil {
+			t.Fatalf("call %d: %v", i, e)
+		}
+	}
+	if elapsed < 2*latency-30*time.Millisecond {
+		t.Fatalf("operations-service calls not serialized: elapsed %v, want >= ~%v", elapsed, 2*latency)
+	}
+}
+
 // TestSameGroupSerialization proves two concurrent calls in one method group run
 // sequentially: with a per-call fake latency, the serialized total is at least
 // two latencies, not one.

@@ -27,8 +27,11 @@ const (
 	groupMarketData methodGroup = iota // quotes, candles, orderbook
 	groupInstruments
 	groupOrders
+	// groupOperations is the real broker's OperationsService bucket: portfolio,
+	// positions, and operations list all belong to one method group and share a
+	// client-side rate budget, so they must serialize together (they are not
+	// independent groups).
 	groupOperations
-	groupPortfolio
 	groupUsers // version / handshake
 	groupCount
 )
