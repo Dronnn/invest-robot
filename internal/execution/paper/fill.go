@@ -19,8 +19,14 @@ import (
 //   - limit buy fills when ask ≤ limit, at min(ask, limit) — a marketable limit
 //     takes the better current price; limit sell fills when bid ≥ limit, at
 //     max(bid, limit). Limits carry no slippage.
-//   - the price is tick-aligned with Floor for buys and Ceil for sells, so a
-//     buy never rounds above and a sell never below the crossing price.
+//   - tick alignment is chosen so it never favours the trader. A market fill
+//     rounds ADVERSELY — a buy up (Ceil), a sell down (Floor) — so an off-tick
+//     simulated price never improves the fill. A limit fill instead rounds so it
+//     can never violate the limit: a buy down (Floor, so the fill stays ≤ limit)
+//     and a sell up (Ceil, so the fill stays ≥ limit). The two goals only ever
+//     point the same way for limits (a limit fill already sits on the trader's
+//     side of the crossing price), so respecting the limit is the binding rule
+//     there.
 func (s *Simulator) priceFill(side model.Side, typ model.OrderType, limit *model.Decimal, q model.Quote, tick model.Decimal) (price model.Decimal, lowFidelity bool, ok bool, err error) {
 	switch side {
 	case model.SideBuy:
@@ -29,17 +35,19 @@ func (s *Simulator) priceFill(side model.Side, typ model.OrderType, limit *model
 			return model.Decimal{}, false, false, nil
 		}
 		var raw model.Decimal
+		dir := model.Ceil // market buy rounds adversely: up
 		if typ == model.OrderLimit {
 			if limit == nil || base.Cmp(*limit) > 0 {
 				return model.Decimal{}, false, false, nil // does not cross
 			}
-			raw = base // min(base, limit) == base, since base ≤ limit
+			raw = base        // min(base, limit) == base, since base ≤ limit
+			dir = model.Floor // a limit buy fill must stay ≤ the limit price
 		} else {
 			if raw, err = adverse(base, s.slippageBps, true); err != nil {
 				return model.Decimal{}, false, false, err
 			}
 		}
-		aligned, err := raw.RoundToIncrement(tick, model.Floor)
+		aligned, err := raw.RoundToIncrement(tick, dir)
 		if err != nil {
 			return model.Decimal{}, false, false, err
 		}
@@ -51,17 +59,19 @@ func (s *Simulator) priceFill(side model.Side, typ model.OrderType, limit *model
 			return model.Decimal{}, false, false, nil
 		}
 		var raw model.Decimal
+		dir := model.Floor // market sell rounds adversely: down
 		if typ == model.OrderLimit {
 			if limit == nil || base.Cmp(*limit) < 0 {
 				return model.Decimal{}, false, false, nil // does not cross
 			}
-			raw = base // max(base, limit) == base, since base ≥ limit
+			raw = base       // max(base, limit) == base, since base ≥ limit
+			dir = model.Ceil // a limit sell fill must stay ≥ the limit price
 		} else {
 			if raw, err = adverse(base, s.slippageBps, false); err != nil {
 				return model.Decimal{}, false, false, err
 			}
 		}
-		aligned, err := raw.RoundToIncrement(tick, model.Ceil)
+		aligned, err := raw.RoundToIncrement(tick, dir)
 		if err != nil {
 			return model.Decimal{}, false, false, err
 		}

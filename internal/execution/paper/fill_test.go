@@ -30,11 +30,11 @@ func TestPriceFill_Table(t *testing.T) {
 			wantPrice: "100.00", wantOK: true,
 		},
 		{
-			name:    "market buy adds adverse slippage then floors to tick",
+			name:    "market buy adds adverse slippage then rounds adversely up to tick",
 			slipBps: 33, side: model.SideBuy, typ: model.OrderMarket,
-			// 100.00 + 33bps = 100.33; Floor to 0.05 => 100.30 (rounds down).
+			// 100.00 + 33bps = 100.33; Ceil to 0.05 => 100.35 (adverse: rounds up).
 			quote: q("99.90", "100.00", "99.95"), tick: "0.05",
-			wantPrice: "100.30", wantOK: true,
+			wantPrice: "100.35", wantOK: true,
 		},
 		{
 			name: "market sell fills at bid, no slippage",
@@ -43,11 +43,41 @@ func TestPriceFill_Table(t *testing.T) {
 			wantPrice: "99.90", wantOK: true,
 		},
 		{
-			name:    "market sell subtracts adverse slippage then ceils to tick",
+			name:    "market sell subtracts adverse slippage then rounds adversely down to tick",
 			slipBps: 33, side: model.SideSell, typ: model.OrderMarket,
-			// 100.00 - 33bps = 99.67; Ceil to 0.05 => 99.70 (rounds up).
+			// 100.00 - 33bps = 99.67; Floor to 0.05 => 99.65 (adverse: rounds down).
 			quote: q("100.00", "100.10", "100.00"), tick: "0.05",
-			wantPrice: "99.70", wantOK: true,
+			wantPrice: "99.65", wantOK: true,
+		},
+		{
+			name: "market buy on an off-tick ask rounds up even with no slippage",
+			side: model.SideBuy, typ: model.OrderMarket,
+			// ask 100.02, no slippage; Ceil to 0.05 => 100.05 (never improves).
+			quote: q("99.90", "100.02", "99.95"), tick: "0.05",
+			wantPrice: "100.05", wantOK: true,
+		},
+		{
+			name: "market sell on an off-tick bid rounds down even with no slippage",
+			side: model.SideSell, typ: model.OrderMarket,
+			// bid 99.98, no slippage; Floor to 0.05 => 99.95 (never improves).
+			quote: q("99.98", "100.10", "100.00"), tick: "0.05",
+			wantPrice: "99.95", wantOK: true,
+		},
+		{
+			name: "marketable limit buy still fills at or below the limit after rounding",
+			side: model.SideBuy, typ: model.OrderLimit, limit: "99.99",
+			// ask 99.99 crosses; Floor to 0.05 => 99.95 <= limit (Ceil would
+			// give 100.00 and violate the limit).
+			quote: q("99.90", "99.99", "99.95"), tick: "0.05",
+			wantPrice: "99.95", wantOK: true,
+		},
+		{
+			name: "marketable limit sell still fills at or above the limit after rounding",
+			side: model.SideSell, typ: model.OrderLimit, limit: "100.01",
+			// bid 100.01 crosses; Ceil to 0.05 => 100.05 >= limit (Floor would
+			// give 100.00 and violate the limit).
+			quote: q("100.01", "100.10", "100.05"), tick: "0.05",
+			wantPrice: "100.05", wantOK: true,
 		},
 		{
 			name:    "marketable limit buy takes the better ask, ignoring slippage",
