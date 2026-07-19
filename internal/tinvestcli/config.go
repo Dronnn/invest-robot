@@ -49,6 +49,11 @@ type Config struct {
 	// {"0.1"}.
 	SchemaVersions []string
 
+	// Contracts is the exact protobuf-contract allowlist checked at handshake:
+	// a binary reporting a contract outside this set is refused at startup, so a
+	// drifted CLI cannot be trusted for trading. Default {"1.49"}.
+	Contracts []string
+
 	// Stream supervision tuning (StreamMarketdata). Zero fields take defaults.
 	//
 	// StreamQueueSize is the bounded event-channel capacity. StreamLineLimit
@@ -120,6 +125,9 @@ func (cfg Config) withDefaults() Config {
 	}
 	if len(cfg.SchemaVersions) == 0 {
 		cfg.SchemaVersions = []string{"0.1"}
+	}
+	if len(cfg.Contracts) == 0 {
+		cfg.Contracts = []string{"1.49"}
 	}
 	if cfg.StreamQueueSize <= 0 {
 		cfg.StreamQueueSize = defaultStreamQueueSize

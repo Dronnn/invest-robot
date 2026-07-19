@@ -152,6 +152,44 @@ func TestClassifyExitCodeMapping(t *testing.T) {
 	})
 }
 
+func TestClassifyExitCodeContradictsErrorCode(t *testing.T) {
+	cases := map[string]struct {
+		exit int
+		code string
+	}{
+		"auth exit with usage code":     {exit: 3, code: "USAGE"},
+		"usage exit with auth code":     {exit: 2, code: "AUTH"},
+		"network exit with rejected":    {exit: 6, code: "BROKER_REJECTED"},
+		"unconfirmed exit with network": {exit: 7, code: "NETWORK"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			body := `{"ok":false,"error":{"code":"` + tc.code + `","message":"m","retryable":false},` + okMeta + `}`
+			_, _, err := classify(tc.exit, []byte(body), allow01, true, false)
+			var pe *ProtocolError
+			if !errors.As(err, &pe) {
+				t.Fatalf("want *ProtocolError for exit/code mismatch, got %T: %v", err, err)
+			}
+		})
+	}
+}
+
+func TestClassifyUnconfirmedRequiresReconcileCommand(t *testing.T) {
+	cases := map[string]string{
+		"no reconcile block": `{"ok":false,"error":{"code":"UNCONFIRMED","message":"m","retryable":false},` + okMeta + `}`,
+		"empty command":      `{"ok":false,"error":{"code":"UNCONFIRMED","message":"m","retryable":false,"reconcile":{"order_id":"x"}},` + okMeta + `}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := classify(7, []byte(body), allow01, true, false)
+			var pe *ProtocolError
+			if !errors.As(err, &pe) {
+				t.Fatalf("want *ProtocolError for exit 7 without a reconcile command, got %T: %v", err, err)
+			}
+		})
+	}
+}
+
 func TestClassifyReconcileExit1IsSuccess(t *testing.T) {
 	body := `{"ok":true,"data":{"outcomes":[],"unresolved_count":2},` + okMeta + `}`
 	data, _, err := classify(1, []byte(body), allow01, true, true)

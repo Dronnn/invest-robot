@@ -177,6 +177,39 @@ func TestHandshakeRejectsUnknownSchema(t *testing.T) {
 	}
 }
 
+func TestHandshakeRejectsUnknownContract(t *testing.T) {
+	dir := writeScenario(t, map[string]string{
+		"scenario.toml": "account_id = \"x\"\ncontract = \"9.9\"\n",
+	})
+	c := newClient(t, dir, t.TempDir(), nil)
+	info, err := c.Handshake(context.Background())
+	var he *HandshakeError
+	if !errors.As(err, &he) {
+		t.Fatalf("want *HandshakeError for a contract outside the allowlist, got %T: %v", err, err)
+	}
+	if info.Contract != "9.9" {
+		t.Fatalf("rejected handshake should still report the observed contract: %+v", info)
+	}
+}
+
+// TestHostileExitCodeMismatchIsProtocolError drives a fake that reports an
+// AUTH error body under a usage exit code: the adapter must reject the
+// contradiction as a ProtocolError rather than trust either half.
+func TestHostileExitCodeMismatchIsProtocolError(t *testing.T) {
+	dir := writeScenario(t, map[string]string{
+		"scenario.toml": "account_id = \"test-mismatch\"\n" +
+			"[[instruments]]\nuid = \"" + sberUID + "\"\nticker = \"SBER\"\nclass_code = \"TQBR\"\n" +
+			"lot = 10\ncurrency = \"rub\"\nlast_price = \"270.5\"\nlast_price_time = \"2026-07-19T10:00:00Z\"\n" +
+			"[[fail]]\ncommand = \"quotes last\"\ncode = \"AUTH\"\nexit = 2\nmessage = \"mismatched exit and code\"\n",
+	})
+	c := newClient(t, dir, t.TempDir(), nil)
+	_, err := c.QuotesLast(context.Background(), []string{"SBER@TQBR"})
+	var pe *ProtocolError
+	if !errors.As(err, &pe) {
+		t.Fatalf("want *ProtocolError for exit/code mismatch, got %T: %v", err, err)
+	}
+}
+
 func TestHappyScenarioDecode(t *testing.T) {
 	c := newClient(t, shippedScenario(t, "happy"), t.TempDir(), nil)
 	ctx := context.Background()

@@ -141,6 +141,12 @@ func (c *Client) Handshake(ctx context.Context) (Info, error) {
 			Info:   info,
 		}
 	}
+	if !slices.Contains(c.cfg.Contracts, vd.Contract) {
+		return info, &HandshakeError{
+			Reason: fmt.Sprintf("version contract %q not in allowlist %v", vd.Contract, c.cfg.Contracts),
+			Info:   info,
+		}
+	}
 	if meta.SchemaVersion != vd.SchemaVersion {
 		return info, &HandshakeError{
 			Reason: fmt.Sprintf("schema_version mismatch: data %q vs meta %q", vd.SchemaVersion, meta.SchemaVersion),

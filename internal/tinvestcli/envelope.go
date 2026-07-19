@@ -138,6 +138,19 @@ func classify(exit int, stdout []byte, schemaAllowlist []string, checkSchema, al
 		return nil, meta, &ProtocolError{Reason: "ok:true with an error body"}
 	}
 
+	// Exit code and error.code must agree for a documented failure exit: a body
+	// whose code maps to a different exit is not a trustworthy answer. Exit 0
+	// (handled below) and exits outside 0..7 (the switch default) keep their own
+	// specific diagnostics.
+	if !env.OK && exit >= exitInternal && exit <= exitUnconfirmed {
+		if want := exitForErrorCode(broker.Code); want != exit {
+			return nil, meta, &ProtocolError{
+				Reason: "exit code contradicts error.code",
+				Detail: fmt.Sprintf("exit %d, error.code %q maps to exit %d", exit, broker.Code, want),
+			}
+		}
+	}
+
 	switch exit {
 	case exitOK:
 		if !env.OK {
@@ -196,20 +209,47 @@ func classify(exit int, stdout []byte, schemaAllowlist []string, checkSchema, al
 		if env.OK {
 			return nil, meta, contradiction(exit)
 		}
-		hint := ReconcileHint{}
-		if env.Error != nil && env.Error.ReconcileHint != nil {
-			hint = ReconcileHint{
+		// An outcome-unknown result is worthless without the reconcile command
+		// the caller must run before any further mutation: a missing command is a
+		// contract violation, not a usable answer.
+		if env.Error.ReconcileHint == nil || env.Error.ReconcileHint.Command == "" {
+			return nil, meta, &ProtocolError{Reason: "exit 7 (outcome unknown) without a reconcile command"}
+		}
+		return nil, meta, &OutcomeUnknownError{
+			BrokerError: broker,
+			ReconcileHint: ReconcileHint{
 				OrderID: env.Error.ReconcileHint.OrderID,
 				Command: env.Error.ReconcileHint.Command,
-			}
+			},
 		}
-		return nil, meta, &OutcomeUnknownError{BrokerError: broker, ReconcileHint: hint}
 
 	default:
 		return nil, meta, &ProtocolError{
 			Reason: "exit code outside the documented 0..7 contract",
 			Detail: fmt.Sprintf("exit %d", exit),
 		}
+	}
+}
+
+// exitForErrorCode maps a render error code to the exit code it must accompany,
+// mirroring the CLI's CLIError.ExitCode. An unknown code is an internal failure
+// (exit 1), so exit 1 accepts any code while exits 2..7 demand an exact match.
+func exitForErrorCode(code string) int {
+	switch code {
+	case "USAGE", "POLICY":
+		return exitUsage
+	case "AUTH":
+		return exitAuth
+	case "RATE_LIMITED":
+		return exitRateLimited
+	case "BROKER_REJECTED":
+		return exitRejected
+	case "NETWORK":
+		return exitNetwork
+	case "UNCONFIRMED":
+		return exitUnconfirmed
+	default:
+		return exitInternal
 	}
 }
 
