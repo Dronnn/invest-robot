@@ -16,8 +16,10 @@ import (
 
 var openSession execution.Session // zero value => 24h open
 
-// TestSubmit_NextObservationDiscipline proves Submit never fills: the intent
-// rests in acked with no fill row, and only the following OnQuote fills it.
+// TestSubmit_NextObservationDiscipline proves Submit never fills and, past that,
+// that the very observation the order was submitted against cannot fill it: only
+// a strictly later observation does. This is the discipline that stops a fill
+// against a quote observed no later than the decision it acts on.
 func TestSubmit_NextObservationDiscipline(t *testing.T) {
 	ctx := context.Background()
 	db := openDB(t)
@@ -26,8 +28,8 @@ func TestSubmit_NextObservationDiscipline(t *testing.T) {
 	s := newSim(t, db, clk, applier, 0, "0")
 	instr := seedInstrument(t, db, "uid-1", 10, "0.01")
 
-	q := quote("uid-1", "99.90", "100.00", "99.95", 0)
-	id := submit(t, s, db, buyMarket("uid-1", 2), instr, q, openSession)
+	q0 := quote("uid-1", "99.90", "100.00", "99.95", 0) // the submission observation
+	id := submit(t, s, db, buyMarket("uid-1", 2), instr, q0, openSession)
 
 	if got := stateOf(t, db, id); got != model.IntentAcked {
 		t.Fatalf("state after Submit = %s, want acked (Submit must not fill)", got)
@@ -39,14 +41,27 @@ func TestSubmit_NextObservationDiscipline(t *testing.T) {
 		t.Fatalf("Submit invoked the applier %d times, want 0", len(applier.recorded()))
 	}
 
-	if err := s.OnQuote(ctx, q); err != nil {
-		t.Fatalf("OnQuote: %v", err)
+	// Re-offering the submission observation must not fill it: it is not a
+	// later observation than the one the order was activated on.
+	if err := s.OnQuote(ctx, q0); err != nil {
+		t.Fatalf("OnQuote same observation: %v", err)
+	}
+	if got := stateOf(t, db, id); got != model.IntentAcked {
+		t.Fatalf("state after the submission observation = %s, want acked (must not fill)", got)
+	}
+	if len(fillsOf(t, db, id)) != 0 {
+		t.Fatal("the submission observation produced a fill")
+	}
+
+	// A strictly later observation fills it.
+	q1 := quote("uid-1", "99.90", "100.00", "99.95", time.Second)
+	if err := observe(t, s, clk, q1); err != nil {
+		t.Fatalf("OnQuote next observation: %v", err)
 	}
 	if got := stateOf(t, db, id); got != model.IntentFilled {
-		t.Fatalf("state after OnQuote = %s, want filled", got)
+		t.Fatalf("state after the next observation = %s, want filled", got)
 	}
-	fs := fillsOf(t, db, id)
-	if len(fs) != 1 {
+	if fs := fillsOf(t, db, id); len(fs) != 1 {
 		t.Fatalf("got %d fills, want 1", len(fs))
 	}
 }
@@ -54,16 +69,17 @@ func TestSubmit_NextObservationDiscipline(t *testing.T) {
 // TestOnQuote_MarketBuyFillPriceAndCommission checks the end-to-end fill price,
 // quantity, commission and the payload handed to the portfolio.
 func TestOnQuote_MarketBuyFillPriceAndCommission(t *testing.T) {
-	ctx := context.Background()
 	db := openDB(t)
 	clk := clock.NewSimulated(base)
 	applier := &fakeApplier{}
 	s := newSim(t, db, clk, applier, 0, "0.0005")
 	instr := seedInstrument(t, db, "uid-1", 10, "0.01")
 
-	q := quote("uid-1", "99.90", "100.00", "99.95", 0)
-	id := submit(t, s, db, buyMarket("uid-1", 2), instr, q, openSession)
-	if err := s.OnQuote(ctx, q); err != nil {
+	q0 := quote("uid-1", "99.90", "100.00", "99.95", 0)
+	id := submit(t, s, db, buyMarket("uid-1", 2), instr, q0, openSession)
+	fillTS := base.Add(time.Second)
+	q1 := quote("uid-1", "99.90", "100.00", "99.95", time.Second) // the next observation
+	if err := observe(t, s, clk, q1); err != nil {
 		t.Fatalf("OnQuote: %v", err)
 	}
 
@@ -82,8 +98,8 @@ func TestOnQuote_MarketBuyFillPriceAndCommission(t *testing.T) {
 	if f.Fee.Cmp(model.MustDecimal("1.00")) != 0 {
 		t.Errorf("fill fee = %s, want 1", f.Fee)
 	}
-	if !f.TS.Equal(base) {
-		t.Errorf("fill ts = %s, want %s (clock time)", f.TS, base)
+	if !f.TS.Equal(fillTS) {
+		t.Errorf("fill ts = %s, want %s (clock time at the filling observation)", f.TS, fillTS)
 	}
 	if f.LowFidelity {
 		t.Error("fills.low_fidelity = true, want false (priced from a real ask, not the last-price fallback)")
@@ -108,18 +124,19 @@ func TestOnQuote_MarketBuyFillPriceAndCommission(t *testing.T) {
 // TestOnQuote_RestingLimitCrossesLater proves a limit order rests until a quote
 // crosses it.
 func TestOnQuote_RestingLimitCrossesLater(t *testing.T) {
-	ctx := context.Background()
 	db := openDB(t)
 	clk := clock.NewSimulated(base)
 	applier := &fakeApplier{}
 	s := newSim(t, db, clk, applier, 0, "0")
 	instr := seedInstrument(t, db, "uid-1", 1, "0.01")
 
-	// Limit buy at 100.00 with the ask above it: does not cross.
-	q1 := quote("uid-1", "100.05", "100.10", "100.07", 0)
-	id := submit(t, s, db, buyLimit("uid-1", 1, "100.00"), instr, q1, openSession)
+	// Limit buy at 100.00 with the ask above it: does not cross. A later
+	// observation with the ask still above the limit keeps it resting.
+	q0 := quote("uid-1", "100.05", "100.10", "100.07", 0) // submission observation
+	id := submit(t, s, db, buyLimit("uid-1", 1, "100.00"), instr, q0, openSession)
 
-	if err := s.OnQuote(ctx, q1); err != nil {
+	q1 := quote("uid-1", "100.05", "100.10", "100.07", time.Second)
+	if err := observe(t, s, clk, q1); err != nil {
 		t.Fatalf("OnQuote non-cross: %v", err)
 	}
 	if got := stateOf(t, db, id); got != model.IntentAcked {
@@ -130,8 +147,8 @@ func TestOnQuote_RestingLimitCrossesLater(t *testing.T) {
 	}
 
 	// Ask drops to the limit: now it crosses and fills.
-	q2 := quote("uid-1", "99.95", "100.00", "99.97", time.Second)
-	if err := s.OnQuote(ctx, q2); err != nil {
+	q2 := quote("uid-1", "99.95", "100.00", "99.97", 2*time.Second)
+	if err := observe(t, s, clk, q2); err != nil {
 		t.Fatalf("OnQuote cross: %v", err)
 	}
 	if got := stateOf(t, db, id); got != model.IntentFilled {
@@ -143,8 +160,8 @@ func TestOnQuote_RestingLimitCrossesLater(t *testing.T) {
 	}
 }
 
-// TestOnQuote_StaleQuoteRests: a quote older than the freshness window does not
-// fill a resting day order.
+// TestOnQuote_StaleQuoteRests: an observation older than the freshness window
+// does not fill a resting day order, even when it is a valid later observation.
 func TestOnQuote_StaleQuoteRests(t *testing.T) {
 	ctx := context.Background()
 	db := openDB(t)
@@ -156,7 +173,11 @@ func TestOnQuote_StaleQuoteRests(t *testing.T) {
 	fresh := quote("uid-1", "99.90", "100.00", "99.95", 0)
 	id := submit(t, s, db, buyMarket("uid-1", 1), instr, fresh, openSession)
 
-	stale := quote("uid-1", "99.90", "100.00", "99.95", -2*time.Minute) // 2 min old
+	// Advance the clock well past the freshness window, then offer an
+	// observation that is after activation but three minutes older than "now"
+	// — a strictly-later observation that is nonetheless too stale to act on.
+	clk.Advance(5 * time.Minute)
+	stale := quote("uid-1", "99.90", "100.00", "99.95", 2*time.Minute) // TS base+2m, now base+5m => 3m old
 	if err := s.OnQuote(ctx, stale); err != nil {
 		t.Fatalf("OnQuote stale: %v", err)
 	}
@@ -171,19 +192,21 @@ func TestOnQuote_StaleQuoteRests(t *testing.T) {
 // TestOnQuote_OutsideSessionRests: a quote outside the session window does not
 // fill.
 func TestOnQuote_OutsideSessionRests(t *testing.T) {
-	ctx := context.Background()
 	db := openDB(t)
 	clk := clock.NewSimulated(base)
 	applier := &fakeApplier{}
 	s := newSim(t, db, clk, applier, 0, "0")
 	instr := seedInstrument(t, db, "uid-1", 1, "0.01")
 
-	// Session opens an hour after the quote's timestamp, so the quote is out.
+	// Session opens an hour after submission. A later observation (30 min in)
+	// is a valid next observation but still before the session opens, so it
+	// must not fill.
 	sess := execution.Session{Start: base.Add(time.Hour), End: base.Add(2 * time.Hour)}
-	q := quote("uid-1", "99.90", "100.00", "99.95", 0)
-	id := submit(t, s, db, buyMarket("uid-1", 1), instr, q, sess)
+	q0 := quote("uid-1", "99.90", "100.00", "99.95", 0)
+	id := submit(t, s, db, buyMarket("uid-1", 1), instr, q0, sess)
 
-	if err := s.OnQuote(ctx, q); err != nil {
+	later := quote("uid-1", "99.90", "100.00", "99.95", 30*time.Minute)
+	if err := observe(t, s, clk, later); err != nil {
 		t.Fatalf("OnQuote out of session: %v", err)
 	}
 	if got := stateOf(t, db, id); got != model.IntentAcked {
@@ -263,17 +286,17 @@ func TestSubmit_HoldProducesNoIntent(t *testing.T) {
 // TestSettle_RollbackOnApplierError: a failing portfolio applier rolls back the
 // whole fill — the intent stays acked and no fill row lands.
 func TestSettle_RollbackOnApplierError(t *testing.T) {
-	ctx := context.Background()
 	db := openDB(t)
 	clk := clock.NewSimulated(base)
 	applier := &fakeApplier{err: errors.New("portfolio boom")}
 	s := newSim(t, db, clk, applier, 0, "0.0005")
 	instr := seedInstrument(t, db, "uid-1", 10, "0.01")
 
-	q := quote("uid-1", "99.90", "100.00", "99.95", 0)
-	id := submit(t, s, db, buyMarket("uid-1", 1), instr, q, openSession)
+	q0 := quote("uid-1", "99.90", "100.00", "99.95", 0)
+	id := submit(t, s, db, buyMarket("uid-1", 1), instr, q0, openSession)
 
-	err := s.OnQuote(ctx, q)
+	q1 := quote("uid-1", "99.90", "100.00", "99.95", time.Second) // next observation reaches settle
+	err := observe(t, s, clk, q1)
 	if err == nil {
 		t.Fatal("OnQuote returned nil, want the applier error surfaced")
 	}
@@ -301,8 +324,13 @@ func TestOnQuote_ConcurrentFillsExactlyOnce(t *testing.T) {
 	s := newSim(t, db, clk, applier, 0, "0")
 	instr := seedInstrument(t, db, "uid-1", 1, "0.01")
 
-	q := quote("uid-1", "99.90", "100.00", "99.95", 0)
-	id := submit(t, s, db, buyMarket("uid-1", 1), instr, q, openSession)
+	q0 := quote("uid-1", "99.90", "100.00", "99.95", 0)
+	id := submit(t, s, db, buyMarket("uid-1", 1), instr, q0, openSession)
+
+	// Advance the clock once so the racing observation is a valid next
+	// observation, then race many OnQuote calls against that single quote.
+	q1 := quote("uid-1", "99.90", "100.00", "99.95", time.Second)
+	clk.Advance(time.Second)
 
 	const n = 8
 	var wg sync.WaitGroup
@@ -311,7 +339,7 @@ func TestOnQuote_ConcurrentFillsExactlyOnce(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			errs[i] = s.OnQuote(ctx, q)
+			errs[i] = s.OnQuote(ctx, q1)
 		}(i)
 	}
 	wg.Wait()
@@ -347,17 +375,17 @@ func TestExpireDay_CancelsRestingDayOrders(t *testing.T) {
 	a := seedInstrument(t, db, "uid-a", 1, "0.01")
 	b := seedInstrument(t, db, "uid-b", 1, "0.01")
 
-	// A: a market buy that fills before expiry.
+	// A: a market buy that fills before expiry, on a later observation.
 	qa := quote("uid-a", "9.99", "10.00", "9.99", 0)
 	idFilled := submit(t, s, db, buyMarket("uid-a", 1), a, qa, openSession)
-	if err := s.OnQuote(ctx, qa); err != nil {
+	if err := observe(t, s, clk, quote("uid-a", "9.99", "10.00", "9.99", time.Second)); err != nil {
 		t.Fatalf("OnQuote A: %v", err)
 	}
 
 	// B: a limit buy that never crosses, so it rests until expiry.
 	qb := quote("uid-b", "20.05", "20.10", "20.07", 0)
 	idResting := submit(t, s, db, buyLimit("uid-b", 1, "20.00"), b, qb, openSession)
-	if err := s.OnQuote(ctx, qb); err != nil {
+	if err := observe(t, s, clk, quote("uid-b", "20.05", "20.10", "20.07", 2*time.Second)); err != nil {
 		t.Fatalf("OnQuote B: %v", err)
 	}
 	if got := stateOf(t, db, idResting); got != model.IntentAcked {
@@ -375,8 +403,10 @@ func TestExpireDay_CancelsRestingDayOrders(t *testing.T) {
 	}
 }
 
-// TestOnQuote_IOCUnfilledCancels: an immediate-or-cancel order that does not
-// cross on its first observation is canceled rather than left resting.
+// TestOnQuote_IOCUnfilledCancels: an immediate-or-cancel order is canceled when
+// it does not cross on its first genuine next observation — but the observation
+// it was submitted against must not cancel it (a pre-decision quote must neither
+// fill nor cancel).
 func TestOnQuote_IOCUnfilledCancels(t *testing.T) {
 	ctx := context.Background()
 	db := openDB(t)
@@ -385,14 +415,24 @@ func TestOnQuote_IOCUnfilledCancels(t *testing.T) {
 	instr := seedInstrument(t, db, "uid-1", 1, "0.01")
 
 	d := model.Decision{InstrumentUID: instr.UID, Action: model.ActionBuy, Quantity: 1, OrderType: model.OrderLimit, LimitPrice: decPtr("100.00"), TimeInForce: model.TIFIOC}
-	q := quote("uid-1", "100.05", "100.10", "100.07", 0) // above the limit: no cross
-	id := submit(t, s, db, d, instr, q, openSession)
+	q0 := quote("uid-1", "100.05", "100.10", "100.07", 0) // submission observation, above the limit
+	id := submit(t, s, db, d, instr, q0, openSession)
 
-	if err := s.OnQuote(ctx, q); err != nil {
-		t.Fatalf("OnQuote: %v", err)
+	// The submission observation must leave the IOC resting, not cancel it.
+	if err := s.OnQuote(ctx, q0); err != nil {
+		t.Fatalf("OnQuote same observation: %v", err)
+	}
+	if got := stateOf(t, db, id); got != model.IntentAcked {
+		t.Fatalf("IOC state after the submission observation = %s, want acked (must not cancel yet)", got)
+	}
+
+	// Its first genuine next observation still does not cross: now it cancels.
+	q1 := quote("uid-1", "100.05", "100.10", "100.07", time.Second)
+	if err := observe(t, s, clk, q1); err != nil {
+		t.Fatalf("OnQuote next observation: %v", err)
 	}
 	if got := stateOf(t, db, id); got != model.IntentCanceled {
-		t.Fatalf("IOC state after non-cross = %s, want canceled", got)
+		t.Fatalf("IOC state after a non-crossing next observation = %s, want canceled", got)
 	}
 }
 
@@ -407,14 +447,14 @@ func TestDeterminism_SameScriptSameFills(t *testing.T) {
 		s := newSim(t, db, clk, applier, 25, "0.0005")
 		instr := seedInstrument(t, db, "uid-1", 10, "0.01")
 
-		// Market buy fills on the next quote; limit sell rests then crosses.
+		// Market buy fills on its next observation; limit sell rests then crosses.
 		qBuy := quote("uid-1", "99.90", "100.00", "99.95", 0)
 		submit(t, s, db, buyMarket("uid-1", 3), instr, qBuy, openSession)
-		mustOnQuote(t, s, qBuy)
+		mustObserve(t, s, clk, quote("uid-1", "99.90", "100.00", "99.95", time.Second))
 
 		submit(t, s, db, sellLimit("uid-1", 2, "101.00"), instr, qBuy, openSession)
-		mustOnQuote(t, s, quote("uid-1", "100.50", "100.60", "100.55", time.Second))   // no cross
-		mustOnQuote(t, s, quote("uid-1", "101.20", "101.30", "101.25", 2*time.Second)) // crosses
+		mustObserve(t, s, clk, quote("uid-1", "100.50", "100.60", "100.55", 2*time.Second)) // no cross
+		mustObserve(t, s, clk, quote("uid-1", "101.20", "101.30", "101.25", 3*time.Second)) // crosses
 		return applier.recorded()
 	}
 
@@ -432,10 +472,45 @@ func TestDeterminism_SameScriptSameFills(t *testing.T) {
 	}
 }
 
-func mustOnQuote(t *testing.T, s *Simulator, q model.Quote) {
-	t.Helper()
-	if err := s.OnQuote(context.Background(), q); err != nil {
-		t.Fatalf("OnQuote: %v", err)
+// TestOnQuote_PreActivationAndFutureQuotesDoNotFill proves the two quotes that
+// are not a valid next observation — one stamped before the order was activated
+// (a delayed pre-decision quote) and one stamped in the future — neither fill a
+// day order nor cancel an IOC.
+func TestOnQuote_PreActivationAndFutureQuotesDoNotFill(t *testing.T) {
+	ctx := context.Background()
+	db := openDB(t)
+	clk := clock.NewSimulated(base)
+	s := newSim(t, db, clk, &fakeApplier{}, 0, "0")
+	instr := seedInstrument(t, db, "uid-1", 1, "0.01")
+
+	// A market day buy and an IOC limit buy, both activated at base.
+	submissionQuote := quote("uid-1", "99.90", "100.00", "99.95", 0)
+	dayID := submit(t, s, db, buyMarket("uid-1", 1), instr, submissionQuote, openSession)
+	iocDec := model.Decision{InstrumentUID: instr.UID, Action: model.ActionBuy, Quantity: 1, OrderType: model.OrderLimit, LimitPrice: decPtr("100.00"), TimeInForce: model.TIFIOC}
+	iocID := submit(t, s, db, iocDec, instr, submissionQuote, openSession)
+
+	// A quote observed one second BEFORE activation (delayed delivery). It is
+	// crossable for both orders, yet must be ignored entirely.
+	preDecision := quote("uid-1", "99.90", "100.00", "99.95", -time.Second)
+	if err := s.OnQuote(ctx, preDecision); err != nil {
+		t.Fatalf("OnQuote pre-decision: %v", err)
+	}
+
+	// A future-dated quote (the clock is still at base). Also crossable, also
+	// ignored.
+	future := quote("uid-1", "99.90", "100.00", "99.95", time.Hour)
+	if err := s.OnQuote(ctx, future); err != nil {
+		t.Fatalf("OnQuote future: %v", err)
+	}
+
+	if got := stateOf(t, db, dayID); got != model.IntentAcked {
+		t.Errorf("day order state = %s, want acked (neither quote is a valid observation)", got)
+	}
+	if got := stateOf(t, db, iocID); got != model.IntentAcked {
+		t.Errorf("ioc order state = %s, want acked (a pre-activation/future quote must not cancel it)", got)
+	}
+	if len(fillsOf(t, db, dayID)) != 0 || len(fillsOf(t, db, iocID)) != 0 {
+		t.Fatal("a pre-activation or future quote produced a fill")
 	}
 }
 

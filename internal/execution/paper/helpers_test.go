@@ -151,6 +151,27 @@ func submit(t *testing.T, s *Simulator, db *sqlite.DB, d model.Decision, instr m
 	return created[0]
 }
 
+// observe advances the simulated clock forward to q's observation time (never
+// backward) and offers q to the simulator, mirroring how a live feed drives the
+// clock forward as observations arrive. A quote stamped in the past (a stale
+// observation) leaves the clock where it is. This is how a test presents a
+// strictly-later "next observation" for the next-observation discipline: after
+// advancing, clock.Now() == q.TS, so the fill is stamped at the observation.
+func observe(t *testing.T, s *Simulator, clk *clock.Simulated, q model.Quote) error {
+	t.Helper()
+	if d := q.TS.Sub(clk.Now()); d > 0 {
+		clk.Advance(d)
+	}
+	return s.OnQuote(context.Background(), q)
+}
+
+func mustObserve(t *testing.T, s *Simulator, clk *clock.Simulated, q model.Quote) {
+	t.Helper()
+	if err := observe(t, s, clk, q); err != nil {
+		t.Fatalf("OnQuote at %s: %v", q.TS, err)
+	}
+}
+
 func buyMarket(uid model.InstrumentUID, qty int64) model.Decision {
 	return model.Decision{InstrumentUID: uid, Action: model.ActionBuy, Quantity: qty, OrderType: model.OrderMarket, TimeInForce: model.TIFDay}
 }

@@ -175,11 +175,28 @@ func (s *Simulator) OnQuote(ctx context.Context, q model.Quote) error {
 	return nil
 }
 
-// tryFill attempts to fill one resting intent against q, enforcing freshness,
-// session, tick and (for limits) the crossing condition. An order that cannot
-// fill on this observation rests if it is a day order or is canceled if it is
-// immediate-or-cancel.
+// tryFill attempts to fill one resting intent against q, enforcing the
+// next-observation discipline, freshness, session, tick and (for limits) the
+// crossing condition. An order that cannot fill on this observation rests if it
+// is a day order or is canceled if it is immediate-or-cancel.
+//
+// Next-observation discipline (DESIGN §7): an order may only fill on an
+// observation taken strictly after it was activated. The intent's CreatedAt is
+// the activation instant — the moment Submit journaled it — so a quote at or
+// before it is the same or an earlier observation than the one the decision was
+// made on and must not fill. A future-dated quote (TS after the current clock)
+// is likewise not a real observation yet. Crucially, neither a pre-activation
+// nor a future quote may cancel an immediate-or-cancel order: those quotes are
+// simply not this order's next observation, so it keeps resting until a real
+// later one arrives (a delayed pre-decision quote must neither fill nor cancel).
 func (s *Simulator) tryFill(ctx context.Context, in model.OrderIntent, q model.Quote, instr model.Instrument, now time.Time, sess execution.Session) error {
+	if q.TS.After(now) {
+		return nil // future-dated observation: ignore, keep resting
+	}
+	if !q.TS.After(in.CreatedAt) {
+		return nil // at or before activation: not this order's next observation
+	}
+
 	rest := func(reason string) error {
 		if in.TimeInForce == model.TIFIOC {
 			return s.cancel(ctx, in.ClientOrderID, "ioc unfilled: "+reason, now)
