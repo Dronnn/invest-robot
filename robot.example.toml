@@ -18,8 +18,10 @@ profile = "default"
 account = ""
 
 [universe]
-# Instrument tickers or UIDs the robot watches and may trade.
-instruments = ["SBER", "GAZP"]
+# Instruments the robot watches and may trade, in a form the tinvest CLI
+# resolves directly: TICKER@CLASSCODE (TQBR = MOEX main share board),
+# a FIGI, or an instrument UID. Bare tickers are ambiguous and rejected.
+instruments = ["SBER@TQBR", "GAZP@TQBR"]
 
 [schedule]
 # Decision cycle cadence, aligned to completed candle boundaries.
