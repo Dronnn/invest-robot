@@ -1,6 +1,9 @@
 package main
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // parsedArgs is the result of splitting a tinvest-style argv into its command
 // path, positional arguments, and flags.
@@ -15,6 +18,11 @@ type parsedArgs struct {
 	// Boolean and value-optional flags map to a single empty string. Repeatable
 	// flags such as --instrument accumulate every value.
 	flags map[string][]string
+	// flagErr is set when a value flag was the last token with no value
+	// (neither "--flag=value" nor a following "--flag value" token), mirroring
+	// pflag's "flag needs an argument" parse failure. Parsing stops at that
+	// point, matching pflag's fail-fast behavior.
+	flagErr string
 }
 
 // flag names that consume the following token as their value (the "--flag
@@ -23,12 +31,10 @@ type parsedArgs struct {
 // fake speaks.
 var valueFlags = map[string]bool{
 	"-o": true, "--output": true, "--account": true, "--profile": true,
-	"--timeout": true, "--token-file": true, "--config": true, "--endpoint": true,
-	"--ca-file": true, "--policy-file": true, "--depth": true, "--interval": true,
+	"--timeout": true, "--token-file": true, "--depth": true, "--interval": true,
 	"--from": true, "--to": true, "--instrument": true, "--direction": true,
 	"--quantity": true, "--type": true, "--price": true, "--tif": true,
-	"--order-id": true, "--limit": true, "--cursor": true, "--status": true,
-	"--exchange": true, "--year": true, "--out": true, "--input": true,
+	"--order-id": true, "--cursor": true, "--status": true, "--input": true,
 }
 
 // value-optional flags (cobra NoOptDefVal): "--candles" and "--orderbook" only
@@ -52,6 +58,7 @@ var commandGroups = map[string]bool{
 func parseArgs(argv []string) parsedArgs {
 	flags := map[string][]string{}
 	var positional []string
+	var flagErr string
 
 	for i := 0; i < len(argv); i++ {
 		tok := argv[i]
@@ -64,16 +71,22 @@ func parseArgs(argv []string) parsedArgs {
 			flags[name] = append(flags[name], inlineVal)
 			continue
 		}
-		if valueFlags[name] && !noOptDefValFlags[name] && i+1 < len(argv) {
-			flags[name] = append(flags[name], argv[i+1])
-			i++
-			continue
+		if valueFlags[name] && !noOptDefValFlags[name] {
+			if i+1 < len(argv) {
+				flags[name] = append(flags[name], argv[i+1])
+				i++
+				continue
+			}
+			if flagErr == "" {
+				flagErr = fmt.Sprintf("flag needs an argument: %s", name)
+			}
+			break
 		}
 		// Boolean or value-optional flag with no inline value.
 		flags[name] = append(flags[name], "")
 	}
 
-	p := parsedArgs{flags: flags}
+	p := parsedArgs{flags: flags, flagErr: flagErr}
 	if len(positional) == 0 {
 		return p
 	}

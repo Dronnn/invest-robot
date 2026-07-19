@@ -27,6 +27,17 @@ func run(ctx context.Context, argv []string, env envLookup, stdout, stderr io.Wr
 
 	isStream := strings.HasPrefix(p.command, "stream")
 
+	// Reject a malformed argv exactly as real cobra/pflag parsing would: a
+	// value flag with no value, or a flag that doesn't exist for this command
+	// (finding: unknown flags and missing values must be exit 2, not silently
+	// accepted).
+	if p.flagErr != "" {
+		return writeUsageFailure(stdout, s, isStream, &errorBody{Code: "USAGE", Message: p.flagErr})
+	}
+	if body := validateFlags(argv, p.command); body != nil {
+		return writeUsageFailure(stdout, s, isStream, body)
+	}
+
 	// Validate -o exactly as the real CLI does for unary commands; streams
 	// ignore output mode and always emit NDJSON.
 	if !isStream {
@@ -42,7 +53,7 @@ func run(ctx context.Context, argv []string, env envLookup, stdout, stderr io.Wr
 	case p.command == "version":
 		return s.emitVersion(stdout)
 	case p.command == "stream marketdata":
-		return runStream(ctx, s, stdout)
+		return runMarketDataStream(ctx, s, p, stdout)
 	case isStream:
 		_ = writeFrame(stdout, s.errorFrame("USAGE", fmt.Sprintf("unsupported stream command %q", p.command), s.AccountID))
 		return exitUsage
@@ -71,6 +82,19 @@ func run(ctx context.Context, argv []string, env envLookup, stdout, stderr io.Wr
 	}
 	_ = writeEnvelope(stdout, envelope{OK: true, Data: res.data, Meta: s.metaFor(true)})
 	return res.exit
+}
+
+// writeUsageFailure emits a parse-time failure (unknown flag, missing value)
+// through the right channel for the command shape: an NDJSON error frame for a
+// stream command, an envelope for a unary one. Both mirror cobra's behavior of
+// failing before any command-specific RunE logic ever executes.
+func writeUsageFailure(w io.Writer, s *scenario, isStream bool, body *errorBody) int {
+	if isStream {
+		_ = writeFrame(w, s.errorFrame(body.Code, body.Message, s.AccountID))
+	} else {
+		_ = writeEnvelope(w, envelope{OK: false, Error: body, Meta: s.metaFor(false)})
+	}
+	return exitForCode(body.Code)
 }
 
 // versionData mirrors the real `version` data payload field order
