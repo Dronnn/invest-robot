@@ -29,7 +29,7 @@ func (QuoteRepo) Insert(ctx context.Context, q Querier, quote model.Quote) error
 func (QuoteRepo) Latest(ctx context.Context, q Querier, uid model.InstrumentUID) (quote model.Quote, ok bool, err error) {
 	row := q.QueryRowContext(ctx, `
 		SELECT instrument_uid, bid, ask, last, ts FROM quotes
-		WHERE instrument_uid = ? ORDER BY ts DESC LIMIT 1`, string(uid))
+		WHERE instrument_uid = ? ORDER BY ts DESC, id DESC LIMIT 1`, string(uid))
 	quote, err = scanQuote(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Quote{}, false, nil

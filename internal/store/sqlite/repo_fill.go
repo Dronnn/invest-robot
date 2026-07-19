@@ -26,7 +26,7 @@ func (FillRepo) Insert(ctx context.Context, q Querier, f model.Fill) error {
 func (FillRepo) ListByIntent(ctx context.Context, q Querier, intentID string) ([]model.Fill, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT order_intent_id, price, qty, fee, ts FROM fills
-		WHERE order_intent_id = ? ORDER BY ts ASC`, intentID)
+		WHERE order_intent_id = ? ORDER BY ts ASC, id ASC`, intentID)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: list fills for intent %s: %w", intentID, err)
 	}

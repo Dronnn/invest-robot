@@ -62,7 +62,7 @@ func (CycleRepo) Get(ctx context.Context, q Querier, id int64) (Cycle, error) {
 func (CycleRepo) Recent(ctx context.Context, q Querier, limit int) ([]Cycle, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, started_at, as_of, mode, engine, engine_version, prompt_template_hash, config_snapshot, status
-		FROM cycles ORDER BY started_at DESC LIMIT ?`, limit)
+		FROM cycles ORDER BY started_at DESC, id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: recent cycles: %w", err)
 	}

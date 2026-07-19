@@ -55,7 +55,7 @@ func (CashRepo) Balance(ctx context.Context, q Querier, currency string) (model.
 // Recent returns up to limit cash_ledger rows, most recent first.
 func (CashRepo) Recent(ctx context.Context, q Querier, limit int) ([]CashEntry, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT id, ts, delta, currency, reason, ref FROM cash_ledger ORDER BY ts DESC LIMIT ?`, limit)
+		SELECT id, ts, delta, currency, reason, ref FROM cash_ledger ORDER BY ts DESC, id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: recent cash entries: %w", err)
 	}

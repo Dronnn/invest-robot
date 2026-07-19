@@ -57,6 +57,69 @@ func TestQuoteRepo_Latest_NoneFound(t *testing.T) {
 	}
 }
 
+// TestQuoteRepo_Latest_SubsecondOrdering is the append-only counterpart to the
+// timestamp-encoding fix: a quote one nanosecond newer than a whole-second
+// quote must be the one Latest returns. Under the old variable-width encoding
+// the subsecond value sorted before the whole-second one, so Latest returned
+// the wrong row.
+func TestQuoteRepo_Latest_SubsecondOrdering(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	i := seedInstrument(t, db, "uid-1")
+	repo := QuoteRepo{}
+
+	whole := time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC)
+	older := model.Quote{InstrumentUID: i.UID, Bid: model.MustDecimal("100"), Ask: model.MustDecimal("100.5"), Last: model.MustDecimal("100"), TS: whole}
+	newer := model.Quote{InstrumentUID: i.UID, Bid: model.MustDecimal("101"), Ask: model.MustDecimal("101.5"), Last: model.MustDecimal("101"), TS: whole.Add(time.Nanosecond)}
+
+	// Insert the newer one first so row order cannot mask a bad ORDER BY.
+	if err := repo.Insert(ctx, db, newer); err != nil {
+		t.Fatalf("Insert newer: %v", err)
+	}
+	if err := repo.Insert(ctx, db, older); err != nil {
+		t.Fatalf("Insert older: %v", err)
+	}
+
+	got, ok, err := repo.Latest(ctx, db, i.UID)
+	if err != nil || !ok {
+		t.Fatalf("Latest: ok=%v err=%v", ok, err)
+	}
+	if !got.TS.Equal(newer.TS) {
+		t.Errorf("Latest().TS = %v, want the +1ns quote %v", got.TS, newer.TS)
+	}
+	if got.Bid.String() != "101" {
+		t.Errorf("Latest().Bid = %s, want 101 (the newer quote)", got.Bid)
+	}
+}
+
+// TestQuoteRepo_Latest_TieBreaksByID proves the id DESC tie-breaker makes
+// "latest" deterministic when two rows share an identical timestamp: the
+// most recently inserted (highest id) wins.
+func TestQuoteRepo_Latest_TieBreaksByID(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	i := seedInstrument(t, db, "uid-1")
+	repo := QuoteRepo{}
+
+	ts := time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC)
+	first := model.Quote{InstrumentUID: i.UID, Bid: model.MustDecimal("100"), Ask: model.MustDecimal("100.5"), Last: model.MustDecimal("100"), TS: ts}
+	second := model.Quote{InstrumentUID: i.UID, Bid: model.MustDecimal("102"), Ask: model.MustDecimal("102.5"), Last: model.MustDecimal("102"), TS: ts}
+	if err := repo.Insert(ctx, db, first); err != nil {
+		t.Fatalf("Insert first: %v", err)
+	}
+	if err := repo.Insert(ctx, db, second); err != nil {
+		t.Fatalf("Insert second: %v", err)
+	}
+
+	got, ok, err := repo.Latest(ctx, db, i.UID)
+	if err != nil || !ok {
+		t.Fatalf("Latest: ok=%v err=%v", ok, err)
+	}
+	if got.Bid.String() != "102" {
+		t.Errorf("Latest().Bid = %s, want 102 (highest-id row on an equal-ts tie)", got.Bid)
+	}
+}
+
 func TestQuote_HasBidAsk(t *testing.T) {
 	db := openTest(t)
 	ctx := context.Background()

@@ -28,7 +28,7 @@ func (EventRepo) Insert(ctx context.Context, q Querier, e Event) (int64, error) 
 // Recent returns up to limit events, most recent first.
 func (EventRepo) Recent(ctx context.Context, q Querier, limit int) ([]Event, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT id, ts, level, code, payload FROM events ORDER BY ts DESC LIMIT ?`, limit)
+		SELECT id, ts, level, code, payload FROM events ORDER BY ts DESC, id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: recent events: %w", err)
 	}

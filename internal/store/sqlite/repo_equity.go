@@ -31,7 +31,7 @@ func (EquityRepo) Insert(ctx context.Context, q Querier, s EquitySnapshot) (int6
 // exists.
 func (EquityRepo) Latest(ctx context.Context, q Querier) (s EquitySnapshot, ok bool, err error) {
 	row := q.QueryRowContext(ctx, `
-		SELECT id, ts, cash, market_value, total FROM equity_snapshots ORDER BY ts DESC LIMIT 1`)
+		SELECT id, ts, cash, market_value, total FROM equity_snapshots ORDER BY ts DESC, id DESC LIMIT 1`)
 	s, err = scanEquitySnapshot(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return EquitySnapshot{}, false, nil
@@ -47,7 +47,7 @@ func (EquityRepo) Latest(ctx context.Context, q Querier) (s EquitySnapshot, ok b
 func (EquityRepo) Range(ctx context.Context, q Querier, from, to time.Time) ([]EquitySnapshot, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, ts, cash, market_value, total FROM equity_snapshots
-		WHERE ts >= ? AND ts <= ? ORDER BY ts ASC`, timeText(from), timeText(to))
+		WHERE ts >= ? AND ts <= ? ORDER BY ts ASC, id ASC`, timeText(from), timeText(to))
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: range equity snapshots: %w", err)
 	}
