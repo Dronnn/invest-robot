@@ -157,6 +157,87 @@ func TestValidate_InvalidDecimalField(t *testing.T) {
 	}
 }
 
+func TestValidate_DecimalTooPrecise(t *testing.T) {
+	// Ten fractional digits: passes a naive regex but exceeds model.Decimal's
+	// nine-digit scale, so it must be rejected at load time, not later.
+	path := writeTemp(t, strings.Replace(minimalValidConfig, `max_position_notional = "50000"`, `max_position_notional = "1.0000000001"`, 1))
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() with a 10-fractional-digit limit succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "max_position_notional") {
+		t.Errorf("error = %v, want it to mention the offending field", err)
+	}
+}
+
+func TestValidate_DecimalOverflow(t *testing.T) {
+	// Above model.Decimal's representable range (~9.22e9).
+	path := writeTemp(t, strings.Replace(minimalValidConfig, `max_total_exposure = "150000"`, `max_total_exposure = "10000000000"`, 1))
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() with an out-of-range limit succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "max_total_exposure") {
+		t.Errorf("error = %v, want it to mention the offending field", err)
+	}
+}
+
+func TestValidate_ZeroInterval(t *testing.T) {
+	path := writeTemp(t, minimalValidConfig+"\n[schedule]\ninterval = \"0s\"\n")
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() with a zero schedule.interval succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "interval") {
+		t.Errorf("error = %v, want it to mention the interval", err)
+	}
+}
+
+func TestValidate_UnknownEngine(t *testing.T) {
+	path := writeTemp(t, minimalValidConfig+"\n[engine]\nactive = \"claude-cli\"\n")
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() with a non-Phase-1 engine succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "engine.active") {
+		t.Errorf("error = %v, want it to mention engine.active", err)
+	}
+}
+
+func TestValidate_SessionHalfSpecified(t *testing.T) {
+	path := writeTemp(t, minimalValidConfig+"\n[schedule]\nsession_start = \"10:00\"\n")
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() with only session_start succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "session") {
+		t.Errorf("error = %v, want it to mention the session window", err)
+	}
+}
+
+func TestValidate_SessionStartNotBeforeEnd(t *testing.T) {
+	path := writeTemp(t, minimalValidConfig+"\n[schedule]\nsession_start = \"18:00\"\nsession_end = \"10:00\"\n")
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() with session_start after session_end succeeded, want error")
+	}
+}
+
+func TestValidate_SessionMalformed(t *testing.T) {
+	path := writeTemp(t, minimalValidConfig+"\n[schedule]\nsession_start = \"25:00\"\nsession_end = \"26:00\"\n")
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() with a malformed session time succeeded, want error")
+	}
+}
+
+func TestValidate_SessionWellFormed(t *testing.T) {
+	path := writeTemp(t, minimalValidConfig+"\n[schedule]\nsession_start = \"10:00\"\nsession_end = \"18:45\"\n")
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load() with a valid session window failed: %v", err)
+	}
+}
+
 func TestValidate_MissingRequiredRiskField(t *testing.T) {
 	path := writeTemp(t, `
 [universe]

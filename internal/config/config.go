@@ -7,11 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/Dronnn/invest-robot/internal/model"
 )
 
 // Config is the root of robot.toml.
@@ -87,7 +88,9 @@ type RealConfig struct {
 	Enable bool `toml:"enable"`
 }
 
-var decimalPattern = regexp.MustCompile(`^\d+(\.\d+)?$`)
+// sessionTimeLayout is the strict wall-clock format for schedule.session_start
+// and schedule.session_end.
+const sessionTimeLayout = "15:04"
 
 // DefaultDir returns the invest-robot configuration directory, honoring
 // XDG_CONFIG_HOME: $XDG_CONFIG_HOME/invest-robot when that variable is set,
@@ -172,17 +175,28 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: real trading is not available in phase 1; real.enable must be false and mode must not be \"real\"")
 	}
 
-	if _, err := time.ParseDuration(c.Schedule.Interval); err != nil {
+	interval, err := time.ParseDuration(c.Schedule.Interval)
+	if err != nil {
 		return fmt.Errorf("config: schedule.interval invalid: %w", err)
+	}
+	if interval <= 0 {
+		// A zero or negative cadence would panic time.NewTicker at startup.
+		return fmt.Errorf("config: schedule.interval must be positive (got %q)", c.Schedule.Interval)
 	}
 	if c.Schedule.Timezone != "" {
 		if _, err := time.LoadLocation(c.Schedule.Timezone); err != nil {
 			return fmt.Errorf("config: schedule.timezone invalid: %w", err)
 		}
 	}
+	if err := validateSession(c.Schedule.SessionStart, c.Schedule.SessionEnd); err != nil {
+		return err
+	}
 
-	if c.Engine.Active == "" {
-		return fmt.Errorf("config: engine.active must not be empty")
+	// Phase 1 ships only the deterministic rules engine; "claude-cli" and
+	// "anthropic-api" arrive in Phase 2 (DESIGN §8, §14). Allowing an arbitrary
+	// name here would defer a typo to a late "unknown engine" failure.
+	if c.Engine.Active != "rules" {
+		return fmt.Errorf("config: engine.active must be \"rules\" in phase 1 (got %q)", c.Engine.Active)
 	}
 
 	if err := validateDecimal("risk.max_position_notional", c.Risk.MaxPositionNotional); err != nil {
@@ -221,12 +235,47 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// validateDecimal enforces that a money field parses as a model.Decimal and is
+// non-negative. Parsing through model.ParseDecimal (not just a regex) rejects
+// the values a regex would wave through but the fixed-point type cannot hold:
+// more than nine fractional digits, and magnitudes outside the int64-nano
+// range. Catching those here means a safety limit that looks fine in the file
+// cannot fail later when it is converted to a Decimal.
 func validateDecimal(field, value string) error {
 	if value == "" {
 		return fmt.Errorf("config: %s must not be empty", field)
 	}
-	if !decimalPattern.MatchString(value) {
-		return fmt.Errorf("config: %s must be a non-negative decimal string (got %q)", field, value)
+	d, err := model.ParseDecimal(value)
+	if err != nil {
+		return fmt.Errorf("config: %s invalid: %w", field, err)
+	}
+	if d.Sign() < 0 {
+		return fmt.Errorf("config: %s must not be negative (got %q)", field, value)
+	}
+	return nil
+}
+
+// validateSession enforces that the trading-session window is either fully
+// absent (24h trading) or fully specified as a valid start < end pair in
+// "HH:MM". A half-specified or malformed window is rejected at startup rather
+// than silently ignored.
+func validateSession(start, end string) error {
+	if (start == "") != (end == "") {
+		return fmt.Errorf("config: schedule.session_start and schedule.session_end must be set together or both left empty")
+	}
+	if start == "" {
+		return nil
+	}
+	st, err := time.Parse(sessionTimeLayout, start)
+	if err != nil {
+		return fmt.Errorf("config: schedule.session_start must be HH:MM (got %q)", start)
+	}
+	et, err := time.Parse(sessionTimeLayout, end)
+	if err != nil {
+		return fmt.Errorf("config: schedule.session_end must be HH:MM (got %q)", end)
+	}
+	if !st.Before(et) {
+		return fmt.Errorf("config: schedule.session_start (%s) must be before schedule.session_end (%s)", start, end)
 	}
 	return nil
 }
