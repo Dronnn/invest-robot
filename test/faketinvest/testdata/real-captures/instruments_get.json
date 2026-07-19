@@ -1,0 +1,27 @@
+{
+  "ok": true,
+  "data": {
+    "instrument": {
+      "uid": "e6123145-9665-43e0-8413-cd61b8aa9b13",
+      "figi": "BBG004730N88",
+      "ticker": "SBER",
+      "class_code": "TQBR",
+      "name": "Sberbank",
+      "type": "INSTRUMENT_TYPE_SHARE",
+      "lot": 10,
+      "currency": "rub",
+      "min_price_increment": {
+        "units": "0",
+        "nano": 10000000,
+        "value": "0.01"
+      },
+      "trading_status": "SECURITY_TRADING_STATUS_NORMAL_TRADING"
+    }
+  },
+  "meta": {
+    "account_id": "test-brokerage-0001",
+    "elapsed_ms": 0,
+    "contract": "1.49",
+    "schema_version": "0.1"
+  }
+}
