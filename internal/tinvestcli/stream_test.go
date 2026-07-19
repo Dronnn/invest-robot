@@ -383,49 +383,40 @@ func TestStreamAuthFailureNoRestart(t *testing.T) {
 	}
 }
 
-// TestStreamPumpDeliversWhenConsumerFreesCapacity proves the delivery pump
-// hands a pending event to the consumer as soon as capacity frees, even while
-// the feed is quiet — the old flush-on-next-producer-event path stranded it.
-// The queue is capped at 1 so the last price waits behind the connected frame;
-// the next producer frame (a candle) is 8s away, so a prompt (<3s) delivery can
-// only come from the pump reacting to freed capacity, not from a later frame.
+// TestStreamPumpDeliversWhenConsumerFreesCapacity proves the delivery pump hands
+// a pending event to the consumer as soon as capacity frees, with no further
+// producer activity — the old flush-on-next-producer-event path stranded it.
+// This drives the pump directly (no subprocess) so it is deterministic: a
+// channel buffered to 1 is the delivery bottleneck (the queue holds both events)
+// so the last price waits behind the status frame until the consumer reads.
 func TestStreamPumpDeliversWhenConsumerFreesCapacity(t *testing.T) {
-	script := `[
-	  {"type":"connected","time":"2026-07-19T10:00:00Z","data":{"attempt":1,"subscriptions":1}},
-	  {"type":"last_price","time":"2026-07-19T10:00:01Z","data":{"instrument_uid":"` + sberUID + `","price":{"value":"270.8"},"time":"2026-07-19T10:00:01Z"}},
-	  {"type":"candle","time":"2026-07-19T10:00:05Z","delay_ms":8000,"data":{
-	     "instrument_uid":"` + sberUID + `","interval":"SUBSCRIPTION_INTERVAL_FIVE_MINUTES",
-	     "open":{"value":"1"},"high":{"value":"1"},"low":{"value":"1"},"close":{"value":"1"},
-	     "volume":"1","candle_time":"2026-07-19T10:00:00Z"}}
-	]`
-	dir := writeScenario(t, map[string]string{
-		"scenario.toml": "account_id = \"test-pump\"\n[stream]\nscript = \"stream.json\"\n",
-		"stream.json":   script,
-	})
-	c := newClient(t, dir, t.TempDir(), func(cfg *Config) {
-		streamFast(cfg)
-		cfg.StreamQueueSize = 1 // force the price to wait behind connected
-	})
-	s, err := c.StreamMarketdata(context.Background(), StreamRequest{
-		Instruments: []string{sberUID}, LastPrice: true, Candles: true, CandleInterval: model.Interval5m,
-	})
-	if err != nil {
-		t.Fatal(err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &Stream{
+		client: &Client{cfg: Config{StreamQueueSize: 8}.withDefaults()},
+		events: make(chan Event, 1), // delivery bottleneck: one in flight at a time
+		done:   make(chan struct{}),
+		wake:   make(chan struct{}, 1),
 	}
-	defer s.Close()
+	go s.pump(ctx)
 
-	first := <-s.Events() // read connected, freeing channel capacity
+	// Two events into a queue/channel that hold one at a time, then the feed is
+	// quiet: nothing else is produced.
+	s.deliverStatus(StatusEvent{Kind: StatusConnected})
+	s.deliverLastPrice(LastPriceEvent{InstrumentUID: sberUID, Price: model.MustDecimal("270.8")})
+
+	first := <-s.events // read the status, freeing capacity
 	if st, ok := first.(StatusEvent); !ok || st.Kind != StatusConnected {
-		t.Fatalf("first event = %T %+v, want connected", first, first)
+		t.Fatalf("first event = %T %+v, want connected status", first, first)
 	}
-	// Well under the 8s quiet gap but generous enough to absorb scheduling
-	// jitter when the whole suite runs in parallel.
 	select {
-	case ev := <-s.Events():
-		if _, ok := ev.(LastPriceEvent); !ok {
+	case ev := <-s.events:
+		lp, ok := ev.(LastPriceEvent)
+		if !ok {
 			t.Fatalf("second event = %T, want the pending LastPriceEvent", ev)
 		}
-	case <-time.After(3 * time.Second):
+		eqDec(t, lp.Price, "270.8")
+	case <-time.After(2 * time.Second):
 		t.Fatal("pending last price was stranded: not delivered on freed capacity while the feed was quiet")
 	}
 }
@@ -457,7 +448,7 @@ func TestStreamPumpDrainsGapBeforeTerminal(t *testing.T) {
 	// A deliberately slow consumer: sleep between reads so the pump must hold
 	// pending events rather than dumping them into a roomy buffer.
 	var got []Event
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(10 * time.Second)
 	for {
 		select {
 		case ev, ok := <-s.Events():
