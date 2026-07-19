@@ -97,3 +97,16 @@ type FeatureSnapshot struct {
 	AsOf          time.Time
 	Payload       string // JSON
 }
+
+// FillRecord is a persisted fill: the engine-agnostic model.Fill plus two
+// bookkeeping fields no domain package needs to see. LowFidelity is set once,
+// at insert time, by whichever Executor priced the fill (true when the price
+// came from the paper simulator's last-price fallback rather than a real
+// bid/ask, DESIGN §7). RealizedPnL starts nil and is set later, by
+// internal/portfolio via FillRepo.SetRealizedPnL, once a sell's PnL against
+// the position's average price is known; it stays nil for a buy fill.
+type FillRecord struct {
+	model.Fill
+	RealizedPnL *model.Decimal
+	LowFidelity bool
+}

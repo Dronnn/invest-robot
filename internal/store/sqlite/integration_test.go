@@ -29,7 +29,7 @@ func TestApplyFillAtomically(t *testing.T) {
 	}
 
 	applyFill := func(ctx context.Context, tx *sql.Tx) error {
-		if err := (FillRepo{}).Insert(ctx, tx, fill); err != nil {
+		if err := (FillRepo{}).Insert(ctx, tx, fill, false); err != nil {
 			return err
 		}
 		notional, err := fill.Price.MulInt(fill.Qty)
@@ -88,7 +88,7 @@ func TestApplyFillAtomically_RollsBackAllOnFailure(t *testing.T) {
 	fill := model.Fill{IntentID: "co-1", Price: model.MustDecimal("100"), Qty: 5, Fee: model.MustDecimal("1.5"), TS: nowUTC()}
 
 	failing := func(ctx context.Context, tx *sql.Tx) error {
-		if err := (FillRepo{}).Insert(ctx, tx, fill); err != nil {
+		if err := (FillRepo{}).Insert(ctx, tx, fill, false); err != nil {
 			return err
 		}
 		if err := (PositionRepo{}).Upsert(ctx, tx, model.Position{
