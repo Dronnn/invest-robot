@@ -184,6 +184,14 @@ func (c *Client) OperationsList(ctx context.Context, account, cursor string, lim
 // for journaling/reconciliation. req.OrderID must be a UUID (the CLI rejects a
 // non-UUID client order id with a usage error).
 func (c *Client) OrdersPlace(ctx context.Context, req PlaceRequest) (Order, error) {
+	// Fail before spawning: an empty or malformed order id would let the CLI
+	// mint one the journal never sees, breaking idempotency and reconciliation.
+	if !validClientOrderID(req.OrderID) {
+		return Order{}, &UsageError{BrokerError: BrokerError{
+			Code:    "USAGE",
+			Message: "orders place requires a UUID order id (idempotency key)",
+		}}
+	}
 	argv := accountArgv("orders", "place", req.Account)
 	if req.InstrumentID != "" {
 		argv = append(argv, "--instrument", req.InstrumentID)
@@ -203,10 +211,8 @@ func (c *Client) OrdersPlace(ctx context.Context, req PlaceRequest) (Order, erro
 	if req.TimeInForce != "" {
 		argv = append(argv, "--tif", req.TimeInForce.String())
 	}
-	if req.OrderID != "" {
-		argv = append(argv, "--order-id", req.OrderID)
-	}
-	raw, _, err := c.call(ctx, callSpec{grp: groupOrders, argv: argv, timeout: c.cfg.Timeout, read: false})
+	argv = append(argv, "--order-id", req.OrderID)
+	raw, _, err := c.call(ctx, callSpec{grp: groupOrders, argv: argv, timeout: c.cfg.Timeout, read: false, orderID: req.OrderID})
 	if err != nil {
 		return Order{}, err
 	}
@@ -226,7 +232,7 @@ func (c *Client) OrdersGet(ctx context.Context, account, orderID string) (Order,
 // OrdersCancel cancels one order by id. It is a mutation and never retries.
 func (c *Client) OrdersCancel(ctx context.Context, account, orderID string) (CancelResult, error) {
 	argv := append(accountArgv("orders", "cancel", account), orderID)
-	raw, _, err := c.call(ctx, callSpec{grp: groupOrders, argv: argv, timeout: c.cfg.Timeout, read: false})
+	raw, _, err := c.call(ctx, callSpec{grp: groupOrders, argv: argv, timeout: c.cfg.Timeout, read: false, orderID: orderID})
 	if err != nil {
 		return CancelResult{}, err
 	}
@@ -287,6 +293,26 @@ func (c *Client) StopOrdersList(ctx context.Context, account string) ([]StopOrde
 		return nil, err
 	}
 	return w.StopOrders, nil
+}
+
+// validClientOrderID reports whether s is a canonical RFC 4122 UUID string
+// (8-4-4-4-12, hyphenated hex). The tinvest CLI rejects any other --order-id
+// with a usage error, so the adapter checks the shape before spawning rather
+// than paying for a subprocess to learn the id was malformed.
+func validClientOrderID(s string) bool {
+	if len(s) != 36 || s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			continue
+		}
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 // accountArgv builds a "<group> <sub>" command with an optional --account flag.

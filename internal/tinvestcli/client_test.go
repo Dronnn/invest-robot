@@ -445,6 +445,77 @@ func TestHostileOutcomeUnknownMutationNotRetried(t *testing.T) {
 	}
 }
 
+// TestOrdersPlaceRequiresUUIDOrderID proves an empty or malformed order id is
+// rejected as a UsageError before any subprocess is spawned: the CLI would
+// otherwise mint an id the journal never sees.
+func TestOrdersPlaceRequiresUUIDOrderID(t *testing.T) {
+	c := newClient(t, shippedScenario(t, "happy"), t.TempDir(), nil)
+	price := model.MustDecimal("270.5")
+	base := PlaceRequest{
+		Account: "test-brokerage-0001", InstrumentID: "SBER@TQBR", Direction: model.SideBuy,
+		Quantity: 1, Type: model.OrderLimit, LimitPrice: &price, TimeInForce: model.TIFDay,
+	}
+	for _, id := range []string{"", "not-a-uuid", "550e8400e29b41d4a716446655440000", "550e8400-e29b-41d4-a716-44665544000g"} {
+		req := base
+		req.OrderID = id
+		_, err := c.OrdersPlace(context.Background(), req)
+		var ue *UsageError
+		if !errors.As(err, &ue) {
+			t.Fatalf("order id %q must fail UsageError before spawn, got %T: %v", id, err, err)
+		}
+	}
+}
+
+// TestMutationTimeoutIsOutcomeUnknown proves a post-spawn local kill of a
+// mutation is classified as OutcomeUnknownError (the order may have reached the
+// broker), carrying a reconcile hint, not a retryable NetworkError.
+func TestMutationTimeoutIsOutcomeUnknown(t *testing.T) {
+	dir := writeScenario(t, map[string]string{
+		"scenario.toml": "account_id = \"test-timeout\"\n" +
+			"default_latency_ms = 5000\n" +
+			"[[instruments]]\nuid = \"" + sberUID + "\"\nticker = \"SBER\"\nclass_code = \"TQBR\"\n" +
+			"lot = 10\ncurrency = \"rub\"\nlast_price = \"270.5\"\nlast_price_time = \"2026-07-19T10:00:00Z\"\n",
+	})
+	c := newClient(t, dir, t.TempDir(), func(cfg *Config) {
+		cfg.Timeout = 50 * time.Millisecond
+		cfg.KillGrace = 50 * time.Millisecond
+	})
+	price := model.MustDecimal("270.5")
+	_, err := c.OrdersPlace(context.Background(), PlaceRequest{
+		Account: "test-timeout", InstrumentID: "SBER@TQBR", Direction: model.SideBuy,
+		Quantity: 1, Type: model.OrderLimit, LimitPrice: &price, TimeInForce: model.TIFDay,
+		OrderID: orderUUID1,
+	})
+	var oue *OutcomeUnknownError
+	if !errors.As(err, &oue) {
+		t.Fatalf("post-spawn mutation kill must be *OutcomeUnknownError, got %T: %v", err, err)
+	}
+	if oue.ReconcileHint.OrderID != orderUUID1 || oue.ReconcileHint.Command != "tinvest orders reconcile" {
+		t.Fatalf("reconcile hint = %+v, want the client order id and reconcile command", oue.ReconcileHint)
+	}
+}
+
+// TestReadTimeoutIsNetworkError proves a post-spawn local kill of a read call
+// stays a transient NetworkError (retryable), unlike a mutation.
+func TestReadTimeoutIsNetworkError(t *testing.T) {
+	dir := writeScenario(t, map[string]string{
+		"scenario.toml": "account_id = \"test-timeout\"\n" +
+			"default_latency_ms = 5000\n" +
+			"[[instruments]]\nuid = \"" + sberUID + "\"\nticker = \"SBER\"\nclass_code = \"TQBR\"\n" +
+			"lot = 10\ncurrency = \"rub\"\nlast_price = \"270.5\"\nlast_price_time = \"2026-07-19T10:00:00Z\"\n",
+	})
+	c := newClient(t, dir, t.TempDir(), func(cfg *Config) {
+		cfg.Timeout = 50 * time.Millisecond
+		cfg.KillGrace = 50 * time.Millisecond
+		cfg.Retries = -1 // disable retries so the first timeout surfaces
+	})
+	_, err := c.QuotesLast(context.Background(), []string{"SBER@TQBR"})
+	var ne *NetworkError
+	if !errors.As(err, &ne) || !ne.Timeout {
+		t.Fatalf("read timeout must be a *NetworkError with Timeout=true, got %T: %v", err, err)
+	}
+}
+
 func TestHostileRateLimitHonoredAndCapped(t *testing.T) {
 	c := newClient(t, shippedScenario(t, "hostile"), t.TempDir(), func(cfg *Config) {
 		cfg.RetryAfterCap = 150 * time.Millisecond // cap the 1500ms hint for a fast test

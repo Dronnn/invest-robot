@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os/exec"
 	"sync"
-	"time"
 )
 
 // execResult is the raw outcome of one process spawn.
@@ -25,10 +24,12 @@ type execResult struct {
 // The CLI is given its own deadline via --timeout (added by the caller); this
 // function adds a hard-kill backstop at timeout+KillGrace through the context.
 // A hit on that backstop, or a CLI exit reported without our being able to read
-// output, is surfaced by the caller as a NetworkError. Cancellation of the
-// parent ctx is returned verbatim.
-func (c *Client) runProcess(ctx context.Context, timeout time.Duration, argv []string) (execResult, error) {
-	killCtx, cancel := context.WithTimeout(ctx, timeout+c.cfg.KillGrace)
+// output, is a NetworkError for a read call (retryable) but an
+// OutcomeUnknownError for a mutation (spec.read == false): the child was
+// spawned, so the order may have reached the broker and must be reconciled, not
+// retried. Cancellation of the parent ctx is returned verbatim.
+func (c *Client) runProcess(ctx context.Context, spec callSpec, argv []string) (execResult, error) {
+	killCtx, cancel := context.WithTimeout(ctx, spec.timeout+c.cfg.KillGrace)
 	defer cancel()
 
 	cmd := exec.CommandContext(killCtx, c.path, argv...)
@@ -42,6 +43,8 @@ func (c *Client) runProcess(ctx context.Context, timeout time.Duration, argv []s
 	cmd.Stderr = stderr
 
 	if err := cmd.Start(); err != nil {
+		// The child never started, so no request left this process: a setup
+		// failure, not an outcome-unknown mutation.
 		return execResult{}, &ResolveError{Path: c.path, Err: err}
 	}
 	waitErr := cmd.Wait()
@@ -51,8 +54,12 @@ func (c *Client) runProcess(ctx context.Context, timeout time.Duration, argv []s
 	if ctx.Err() != nil {
 		return execResult{}, ctx.Err()
 	}
-	// Our own backstop fired: treat as a transient timeout so reads may retry.
+	// Our own backstop fired after the child started. For a read this is a
+	// transient timeout to retry; for a mutation the outcome is unknown.
 	if errors.Is(killCtx.Err(), context.DeadlineExceeded) {
+		if !spec.read {
+			return execResult{}, c.outcomeUnknown(spec, "tinvest mutation was killed on the local deadline before a confirmed outcome")
+		}
 		return execResult{}, &NetworkError{
 			BrokerError: BrokerError{Message: "tinvest call exceeded the local deadline"},
 			Timeout:     true,
@@ -70,8 +77,13 @@ func (c *Client) runProcess(ctx context.Context, timeout time.Duration, argv []s
 		if errors.As(waitErr, &exitErr) {
 			res.exit = exitErr.ExitCode()
 		} else {
-			// The process could not be waited on cleanly and it was neither a
-			// cancellation nor our timeout: a genuine spawn/IO failure.
+			// The child spawned but could not be waited on cleanly, and it was
+			// neither a cancellation nor our timeout: a genuine spawn/IO failure.
+			// The mutation may still have reached the broker, so its outcome is
+			// unknown; a read is a plain transport failure.
+			if !spec.read {
+				return execResult{}, c.outcomeUnknown(spec, "tinvest mutation process failed before a confirmed outcome: "+waitErr.Error())
+			}
 			return execResult{}, &NetworkError{
 				BrokerError: BrokerError{Message: "tinvest process failed: " + waitErr.Error()},
 			}

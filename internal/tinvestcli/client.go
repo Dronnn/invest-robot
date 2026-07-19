@@ -180,6 +180,25 @@ type callSpec struct {
 	read                bool          // read calls may retry on NetworkError/RateLimitError
 	allowReconcileExit1 bool          // treat exit 1 + ok:true as success (reconcile)
 	skipSchema          bool          // handshake-only: defer the schema check to the caller
+	// orderID is the client/exchange order id a mutation carries, used only to
+	// populate the reconcile hint when a post-spawn local failure leaves the
+	// outcome unknown. Empty for reads and non-order mutations.
+	orderID string
+}
+
+// reconcileCommand is the recovery command a mutation with an unknown outcome
+// must run before any further mutation (DESIGN §4).
+const reconcileCommand = "tinvest orders reconcile"
+
+// outcomeUnknown builds the error for a mutation whose child was spawned but
+// whose outcome could not be confirmed locally (a timeout/kill after start):
+// the order may have reached the broker, so it must be frozen and reconciled,
+// never retried.
+func (c *Client) outcomeUnknown(spec callSpec, msg string) *OutcomeUnknownError {
+	return &OutcomeUnknownError{
+		BrokerError:   BrokerError{Message: msg, Phase: "sent_unconfirmed"},
+		ReconcileHint: ReconcileHint{OrderID: spec.orderID, Command: reconcileCommand},
+	}
 }
 
 // call runs one CLI call to completion under its method-group lock, applying the
@@ -205,7 +224,7 @@ func (c *Client) call(ctx context.Context, spec callSpec) (json.RawMessage, wire
 			}
 		}
 
-		res, err := c.runProcess(ctx, spec.timeout, argv)
+		res, err := c.runProcess(ctx, spec, argv)
 		if err != nil {
 			lastErr = err
 			if spec.read && isRetryable(err) && attempt+1 < maxAttempts {
