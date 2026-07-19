@@ -18,6 +18,9 @@ type App struct {
 
 // New builds an App from a loaded, validated config.
 func New(cfg *config.Config) *App {
+	// Log timestamps in UTC to match the robot's UTC-everywhere discipline
+	// (DESIGN §3), so event logs line up with the UTC times stored in SQLite.
+	log.SetFlags(log.LstdFlags | log.LUTC)
 	return &App{cfg: cfg}
 }
 
