@@ -249,6 +249,47 @@ func TestRolloverConfirmMakesBarComplete(t *testing.T) {
 	}
 }
 
+// TestConfirmBarUsesValidRange proves the rollover confirm fetches
+// [barTime, barTime+interval) rather than a single instant: the real CLI
+// rejects from == to, so a confirm with from >= to could never complete a bar.
+func TestConfirmBarUsesValidRange(t *testing.T) {
+	b := newFakeBroker()
+	b.addInstrument("SBER@TQBR", uidSBER, "SBER")
+	t1 := time.Date(2026, 7, 19, 9, 0, 0, 0, time.UTC)
+	t2 := t1.Add(5 * time.Minute)
+	gotRange := make(chan [2]time.Time, 4)
+	b.setCandles(func(_ string, from, to time.Time) (tinvestcli.CandlesResult, error) {
+		if from.Equal(t1) { // the confirm fetch
+			gotRange <- [2]time.Time{from, to}
+			return mustCandles(t, `{"instrument_uid":"`+uidSBER+`","interval":"5m","candles":[`+
+				bar("2026-07-19T09:00:00Z", "270", "272", "269", "271", "100", true)+`]}`), nil
+		}
+		return tinvestcli.CandlesResult{}, nil // backfill: empty
+	})
+	_, s := tempStore(t)
+	c, _ := market.New(deps(b, s, clock.Real()), market.Config{Universe: []string{"SBER@TQBR"}, Interval: model.Interval5m})
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+	h := <-b.handles
+
+	h.feed(formingCandle(uidSBER, t1, "270.3"))
+	h.feed(formingCandle(uidSBER, t2, "270.9"))
+
+	select {
+	case r := <-gotRange:
+		if !r[0].Equal(t1) || !r[1].Equal(t2) {
+			t.Fatalf("confirm range = [%v, %v], want [%v, %v]", r[0], r[1], t1, t2)
+		}
+		if !r[0].Before(r[1]) {
+			t.Fatal("confirm range must satisfy from < to (the real CLI rejects from >= to)")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("confirm fetch never happened")
+	}
+}
+
 func TestGapEventTriggersBackfill(t *testing.T) {
 	b := newFakeBroker()
 	b.addInstrument("SBER@TQBR", uidSBER, "SBER")

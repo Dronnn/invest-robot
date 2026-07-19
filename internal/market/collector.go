@@ -306,10 +306,26 @@ func (c *Collector) onCandle(ctx context.Context, e tinvestcli.CandleEvent) {
 // confirmBar re-fetches a single just-closed bar via unary CandlesGet and, when
 // the authoritative complete row is present, upserts it (replacing the earlier
 // forming row) and advances the watermark. Failures degrade, never crash.
+//
+// The fetch window is [barTime, barTime+interval): the real CLI requires
+// from < to and rejects from == to as a usage error, so a single-instant
+// window can never confirm a bar. The response echo is validated against the
+// request (uid and interval) before any row is trusted.
 func (c *Collector) confirmBar(ctx context.Context, uid model.InstrumentUID, barTime time.Time) {
-	res, err := c.broker.CandlesGet(ctx, string(uid), c.interval, barTime, barTime)
+	to := barTime.Add(intervalDuration(c.interval))
+	res, err := c.broker.CandlesGet(ctx, string(uid), c.interval, barTime, to)
 	if err != nil {
 		c.logEvent(ctx, LevelWarn, "confirm_fetch_failed", fmt.Sprintf("%s %s: %v", uid, barTime.Format(time.RFC3339), err))
+		c.markStale(uid)
+		return
+	}
+	if res.InstrumentUID != string(uid) {
+		c.logEvent(ctx, LevelWarn, "confirm_uid_mismatch", fmt.Sprintf("%s: got %q", uid, res.InstrumentUID))
+		c.markStale(uid)
+		return
+	}
+	if iv, err := model.ParseCandleInterval(res.Interval); err != nil || iv != c.interval {
+		c.logEvent(ctx, LevelWarn, "confirm_interval_mismatch", fmt.Sprintf("%s: got %q, want %s", uid, res.Interval, c.interval))
 		c.markStale(uid)
 		return
 	}

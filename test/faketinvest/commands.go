@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // unaryResult is the outcome of building one unary command's response. Exactly
@@ -174,9 +175,22 @@ func (s *scenario) candlesGet(p parsedArgs) unaryResult {
 	if !validInstrumentID(id) {
 		return failResult("USAGE", fmt.Sprintf("unrecognized instrument identifier %q: want instrument_uid, FIGI, or TICKER@CLASSCODE", id))
 	}
+	// The real CLI parses a required --from/--to range before resolving the
+	// instrument (parseRequiredTimeRange), so a missing or malformed bound is a
+	// usage error that never reaches the network.
+	from, to, errBody := parseCandleRange(p.flag("--from"), p.flag("--to"))
+	if errBody != nil {
+		return unaryResult{errBody: errBody, exit: exitUsage}
+	}
 	inst, ok := s.resolveInstrument(id)
 	if !ok {
 		return failResult("BROKER_REJECTED", fmt.Sprintf("instrument %q not found", id))
+	}
+	// After resolution the real CLI's CandleWindows requires from < to and
+	// rejects from >= to as a usage error. A rollover confirm that fetches a
+	// single instant (from == to) must fail here, never silently succeed.
+	if !from.Before(to) {
+		return failResult("USAGE", "candle --from must be before --to")
 	}
 	candles := json.RawMessage("[]")
 	if inst.Candles != "" {
@@ -194,6 +208,27 @@ func (s *scenario) candlesGet(p parsedArgs) unaryResult {
 		Candles:       candles,
 	}
 	return marshalData(data)
+}
+
+// parseCandleRange mirrors the real CLI's parseRequiredTimeRange: both bounds
+// are required and must parse as RFC3339. Ordering (from < to) is checked
+// separately, after instrument resolution, to match CandleWindows.
+func parseCandleRange(fromRaw, toRaw string) (time.Time, time.Time, *errorBody) {
+	if fromRaw == "" {
+		return time.Time{}, time.Time{}, &errorBody{Code: "USAGE", Message: "--from is required"}
+	}
+	if toRaw == "" {
+		return time.Time{}, time.Time{}, &errorBody{Code: "USAGE", Message: "--to is required"}
+	}
+	from, err := time.Parse(time.RFC3339, fromRaw)
+	if err != nil {
+		return time.Time{}, time.Time{}, &errorBody{Code: "USAGE", Message: fmt.Sprintf("invalid --from %q: %v", fromRaw, err)}
+	}
+	to, err := time.Parse(time.RFC3339, toRaw)
+	if err != nil {
+		return time.Time{}, time.Time{}, &errorBody{Code: "USAGE", Message: fmt.Sprintf("invalid --to %q: %v", toRaw, err)}
+	}
+	return from, to, nil
 }
 
 // orderbookGet replays the instrument's order-book fixture under the "orderbook"

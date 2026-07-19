@@ -201,6 +201,9 @@ func TestUsageAndRejection(t *testing.T) {
 		{"non_positive_quantity", []string{"orders", "place", "--instrument", "SBER@TQBR", "--direction", "buy", "--quantity", "0", "--type", "market", "--order-id", orderUUID1, "-o", "json"}, exitUsage, "USAGE"},
 		{"limit_requires_price", []string{"orders", "place", "--instrument", "SBER@TQBR", "--direction", "buy", "--quantity", "1", "--type", "limit", "--order-id", orderUUID1, "-o", "json"}, exitUsage, "USAGE"},
 		{"price_not_allowed_for_market", []string{"orders", "place", "--instrument", "SBER@TQBR", "--direction", "buy", "--quantity", "1", "--type", "market", "--price", "270.5", "--order-id", orderUUID1, "-o", "json"}, exitUsage, "USAGE"},
+		{"candles_from_equals_to", []string{"candles", "get", "SBER@TQBR", "--interval", "5m", "--from", "2026-07-19T09:00:00Z", "--to", "2026-07-19T09:00:00Z", "-o", "json"}, exitUsage, "USAGE"},
+		{"candles_from_after_to", []string{"candles", "get", "SBER@TQBR", "--interval", "5m", "--from", "2026-07-19T09:20:00Z", "--to", "2026-07-19T09:00:00Z", "-o", "json"}, exitUsage, "USAGE"},
+		{"candles_missing_to", []string{"candles", "get", "SBER@TQBR", "--interval", "5m", "--from", "2026-07-19T09:00:00Z", "-o", "json"}, exitUsage, "USAGE"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
