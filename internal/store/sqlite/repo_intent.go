@@ -63,19 +63,47 @@ func (e StateConflictError) Error() string {
 // intent state machine (model.CanTransition). This makes the state column safe
 // against lost updates — a terminal filled/canceled intent cannot silently
 // regress into the reconciliation set, and two writers racing on the same
-// intent cannot both "win".
+// intent cannot both "win". The reason column is left untouched.
 //
 // Errors: IllegalTransitionError if from→to is not a legal edge (including any
 // move out of a terminal state); ErrNotFound if no such intent exists;
 // StateConflictError if the intent exists but is not in `from`.
 func (IntentRepo) UpdateState(ctx context.Context, q Querier, clientOrderID string, from, to model.IntentState, updatedAt time.Time) error {
+	return updateIntentState(ctx, q, clientOrderID, from, to, updatedAt, nil)
+}
+
+// UpdateStateWithReason is UpdateState plus recording a human-readable reason
+// for the transition in the same statement (order_intents.reason) — for
+// rejected/canceled transitions where the prose belongs on the row, not just
+// in the events log (DESIGN §12). reason must be non-empty; use UpdateState
+// for a transition with nothing to record. Same CAS semantics and error
+// types as UpdateState.
+func (IntentRepo) UpdateStateWithReason(ctx context.Context, q Querier, clientOrderID string, from, to model.IntentState, updatedAt time.Time, reason string) error {
+	if reason == "" {
+		return fmt.Errorf("sqlite: UpdateStateWithReason: reason must not be empty (use UpdateState)")
+	}
+	return updateIntentState(ctx, q, clientOrderID, from, to, updatedAt, &reason)
+}
+
+// updateIntentState is the shared CAS body behind UpdateState and
+// UpdateStateWithReason; reason nil means "leave the reason column alone",
+// matching UpdateState's contract of touching only state and updated_at.
+func updateIntentState(ctx context.Context, q Querier, clientOrderID string, from, to model.IntentState, updatedAt time.Time, reason *string) error {
 	if !model.CanTransition(from, to) {
 		return IllegalTransitionError{ClientOrderID: clientOrderID, From: from, To: to}
 	}
 
-	res, err := q.ExecContext(ctx,
-		`UPDATE order_intents SET state = ?, updated_at = ? WHERE client_order_id = ? AND state = ?`,
-		to.String(), timeText(updatedAt), clientOrderID, from.String())
+	var res sql.Result
+	var err error
+	if reason != nil {
+		res, err = q.ExecContext(ctx,
+			`UPDATE order_intents SET state = ?, reason = ?, updated_at = ? WHERE client_order_id = ? AND state = ?`,
+			to.String(), *reason, timeText(updatedAt), clientOrderID, from.String())
+	} else {
+		res, err = q.ExecContext(ctx,
+			`UPDATE order_intents SET state = ?, updated_at = ? WHERE client_order_id = ? AND state = ?`,
+			to.String(), timeText(updatedAt), clientOrderID, from.String())
+	}
 	if err != nil {
 		return fmt.Errorf("sqlite: update order intent %s state: %w", clientOrderID, err)
 	}
@@ -99,7 +127,7 @@ func (IntentRepo) UpdateState(ctx context.Context, q Querier, clientOrderID stri
 // Get returns the intent with the given client order id, or ErrNotFound.
 func (IntentRepo) Get(ctx context.Context, q Querier, clientOrderID string) (model.OrderIntent, error) {
 	row := q.QueryRowContext(ctx, `
-		SELECT client_order_id, decision_id, instrument_uid, side, qty, type, limit_price, time_in_force, state, created_at, updated_at
+		SELECT client_order_id, decision_id, instrument_uid, side, qty, type, limit_price, time_in_force, state, reason, created_at, updated_at
 		FROM order_intents WHERE client_order_id = ?`, clientOrderID)
 	in, err := scanIntent(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -116,7 +144,7 @@ func (IntentRepo) Get(ctx context.Context, q Querier, clientOrderID string) (mod
 // (DESIGN §4).
 func (IntentRepo) NonTerminal(ctx context.Context, q Querier) ([]model.OrderIntent, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT client_order_id, decision_id, instrument_uid, side, qty, type, limit_price, time_in_force, state, created_at, updated_at
+		SELECT client_order_id, decision_id, instrument_uid, side, qty, type, limit_price, time_in_force, state, reason, created_at, updated_at
 		FROM order_intents
 		WHERE state NOT IN (?, ?, ?)
 		ORDER BY created_at ASC, client_order_id ASC`,
@@ -144,7 +172,8 @@ func (IntentRepo) NonTerminal(ctx context.Context, q Querier) ([]model.OrderInte
 func scanIntent(s rowScanner) (model.OrderIntent, error) {
 	var in model.OrderIntent
 	var uid, side, typ, tif, state, createdAt, updatedAt string
-	err := s.Scan(&in.ClientOrderID, &in.DecisionID, &uid, &side, &in.Qty, &typ, &in.LimitPrice, &tif, &state, &createdAt, &updatedAt)
+	var reason *string
+	err := s.Scan(&in.ClientOrderID, &in.DecisionID, &uid, &side, &in.Qty, &typ, &in.LimitPrice, &tif, &state, &reason, &createdAt, &updatedAt)
 	if err != nil {
 		return model.OrderIntent{}, err
 	}
@@ -160,6 +189,9 @@ func scanIntent(s rowScanner) (model.OrderIntent, error) {
 	}
 	if in.State, err = model.ParseIntentState(state); err != nil {
 		return model.OrderIntent{}, err
+	}
+	if reason != nil {
+		in.Reason = *reason
 	}
 	if in.CreatedAt, err = parseTimeText(createdAt); err != nil {
 		return model.OrderIntent{}, err

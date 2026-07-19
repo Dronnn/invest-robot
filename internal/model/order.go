@@ -166,7 +166,9 @@ func CanTransition(from, to IntentState) bool {
 
 // OrderIntent is the robot's durable record of an order it means to place,
 // keyed by a stable client order ID and written before any broker call. Qty is
-// in lots. LimitPrice is nil for market orders.
+// in lots. LimitPrice is nil for market orders. Reason is empty unless State
+// is rejected or canceled, in which case it may carry a human-readable
+// explanation (not every rejection/cancel path sets one).
 type OrderIntent struct {
 	ClientOrderID string
 	DecisionID    int64
@@ -177,6 +179,7 @@ type OrderIntent struct {
 	LimitPrice    *Decimal
 	TimeInForce   TimeInForce
 	State         IntentState
+	Reason        string
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }

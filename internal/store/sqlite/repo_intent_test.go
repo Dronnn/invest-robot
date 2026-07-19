@@ -209,6 +209,75 @@ func TestIntentRepo_NonTerminal(t *testing.T) {
 	}
 }
 
+func TestIntentRepo_UpdateStateWithReason(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	i := seedInstrument(t, db, "uid-1")
+	cycleID := seedCycle(t, db)
+	decisionID := seedDecision(t, db, cycleID, i.UID)
+	repo := IntentRepo{}
+	seedIntent(t, db, decisionID, i.UID, "co-1")
+
+	if err := repo.UpdateStateWithReason(ctx, db, "co-1", model.IntentNew, model.IntentRejected, nowUTC(), "unknown or invalid price tick"); err != nil {
+		t.Fatalf("UpdateStateWithReason: %v", err)
+	}
+	got, err := repo.Get(ctx, db, "co-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != model.IntentRejected {
+		t.Errorf("state = %s, want rejected", got.State)
+	}
+	if got.Reason != "unknown or invalid price tick" {
+		t.Errorf("reason = %q, want %q", got.Reason, "unknown or invalid price tick")
+	}
+}
+
+func TestIntentRepo_UpdateStateWithReason_EmptyReasonRejected(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	i := seedInstrument(t, db, "uid-1")
+	cycleID := seedCycle(t, db)
+	decisionID := seedDecision(t, db, cycleID, i.UID)
+	seedIntent(t, db, decisionID, i.UID, "co-1")
+
+	if err := (IntentRepo{}).UpdateStateWithReason(ctx, db, "co-1", model.IntentNew, model.IntentRejected, nowUTC(), ""); err == nil {
+		t.Fatal("expected an error for an empty reason, got nil")
+	}
+	// Nothing should have changed.
+	got, err := (IntentRepo{}).Get(ctx, db, "co-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != model.IntentNew {
+		t.Errorf("state = %s, want new (unchanged)", got.State)
+	}
+}
+
+func TestIntentRepo_UpdateState_LeavesReasonUntouched(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	i := seedInstrument(t, db, "uid-1")
+	cycleID := seedCycle(t, db)
+	decisionID := seedDecision(t, db, cycleID, i.UID)
+	repo := IntentRepo{}
+	seedIntent(t, db, decisionID, i.UID, "co-1")
+
+	// A plain UpdateState (no reason) must not clobber a NULL reason column,
+	// and must leave it NULL going forward for the ordinary happy-path
+	// transitions (new -> submitted -> acked) that never carry one.
+	if err := repo.UpdateState(ctx, db, "co-1", model.IntentNew, model.IntentSubmitted, nowUTC()); err != nil {
+		t.Fatalf("UpdateState: %v", err)
+	}
+	got, err := repo.Get(ctx, db, "co-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Reason != "" {
+		t.Errorf("reason = %q, want empty", got.Reason)
+	}
+}
+
 func TestIntentRepo_ClientOrderIDIsUnique(t *testing.T) {
 	db := openTest(t)
 	ctx := context.Background()
