@@ -12,3 +12,4 @@ tasks/
 
 # stray build artifact from `go build ./test/faketinvest` at repo root
 /faketinvest
+.faketinvest-counts.json
