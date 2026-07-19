@@ -18,6 +18,14 @@ const (
 	hostileDir = "scenarios/hostile"
 )
 
+// Client order ids must be canonical UUIDs — the real CLI rejects anything
+// else with a usage error (validateOrderID in orders.go). These match the
+// constants internal/tinvestcli/client_test.go uses for the same reason.
+const (
+	orderUUID1 = "550e8400-e29b-41d4-a716-446655440000"
+	orderUUID2 = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+)
+
 // invoke runs the fake in-process with the given argv and environment overrides,
 // returning the exit code and captured stdout. A per-call state dir keeps the
 // committed scenarios free of the call-counter file.
@@ -56,7 +64,7 @@ func TestGoldenEnvelopes(t *testing.T) {
 		{"portfolio_get", []string{"portfolio", "get", "-o", "json"}},
 		{"positions_get", []string{"positions", "get", "-o", "json"}},
 		{"operations_list", []string{"operations", "list", "-o", "json"}},
-		{"orders_place", []string{"orders", "place", "--instrument", "SBER@TQBR", "--direction", "buy", "--quantity", "1", "--type", "limit", "--price", "270.5", "--order-id", "happy-1", "-o", "json"}},
+		{"orders_place", []string{"orders", "place", "--instrument", "SBER@TQBR", "--direction", "buy", "--quantity", "1", "--type", "limit", "--price", "270.5", "--order-id", orderUUID1, "-o", "json"}},
 		{"orders_list", []string{"orders", "list", "-o", "json"}},
 		{"orders_cancel", []string{"orders", "cancel", "ord-happy-1", "-o", "json"}},
 		{"stop_orders_list", []string{"stop-orders", "list", "-o", "json"}},
@@ -146,7 +154,7 @@ func TestExitCodeInjection(t *testing.T) {
 
 	t.Run("unconfirmed_order_carries_reconcile_hint", func(t *testing.T) {
 		code, out := invoke(t, map[string]string{"FAKETINVEST_SCENARIO": hostileDir},
-			"orders", "place", "--instrument", "SBER@TQBR", "--direction", "buy", "--quantity", "1", "--type", "market", "--order-id", "hostile-order-1", "-o", "json")
+			"orders", "place", "--instrument", "SBER@TQBR", "--direction", "buy", "--quantity", "1", "--type", "market", "--order-id", orderUUID2, "-o", "json")
 		if code != exitUnconfirmed {
 			t.Fatalf("exit = %d, want %d", code, exitUnconfirmed)
 		}
@@ -157,8 +165,8 @@ func TestExitCodeInjection(t *testing.T) {
 		if body.ReconcileHint == nil {
 			t.Fatal("missing reconcile hint")
 		}
-		if body.ReconcileHint.OrderID != "hostile-order-1" {
-			t.Errorf("reconcile.order_id = %q, want hostile-order-1", body.ReconcileHint.OrderID)
+		if body.ReconcileHint.OrderID != orderUUID2 {
+			t.Errorf("reconcile.order_id = %q, want %s", body.ReconcileHint.OrderID, orderUUID2)
 		}
 		if body.ReconcileHint.Command == "" {
 			t.Error("reconcile.command is empty")
@@ -184,6 +192,15 @@ func TestUsageAndRejection(t *testing.T) {
 		{"invalid_output_format", []string{"version", "-o", "yaml"}, exitUsage, "USAGE"},
 		{"malformed_instrument_id", []string{"instruments", "get", "BAD!!ID", "-o", "json"}, exitUsage, "USAGE"},
 		{"unknown_instrument", []string{"instruments", "get", "NOPE@TQBR", "-o", "json"}, exitRejected, "BROKER_REJECTED"},
+		{"unknown_flag", []string{"quotes", "last", "SBER@TQBR", "--bogus", "wat", "-o", "json"}, exitUsage, "USAGE"},
+		{"flag_wrong_for_command", []string{"orders", "list", "--interval", "5m", "-o", "json"}, exitUsage, "USAGE"},
+		{"missing_flag_value", []string{"quotes", "last", "SBER@TQBR", "-o", "json", "--account"}, exitUsage, "USAGE"},
+		{"order_id_not_a_uuid", []string{"orders", "place", "--instrument", "SBER@TQBR", "--direction", "buy", "--quantity", "1", "--type", "market", "--order-id", "not-a-uuid", "-o", "json"}, exitUsage, "USAGE"},
+		{"invalid_direction", []string{"orders", "place", "--instrument", "SBER@TQBR", "--direction", "up", "--quantity", "1", "--type", "market", "--order-id", orderUUID1, "-o", "json"}, exitUsage, "USAGE"},
+		{"invalid_order_type", []string{"orders", "place", "--instrument", "SBER@TQBR", "--direction", "buy", "--quantity", "1", "--type", "stop", "--order-id", orderUUID1, "-o", "json"}, exitUsage, "USAGE"},
+		{"non_positive_quantity", []string{"orders", "place", "--instrument", "SBER@TQBR", "--direction", "buy", "--quantity", "0", "--type", "market", "--order-id", orderUUID1, "-o", "json"}, exitUsage, "USAGE"},
+		{"limit_requires_price", []string{"orders", "place", "--instrument", "SBER@TQBR", "--direction", "buy", "--quantity", "1", "--type", "limit", "--order-id", orderUUID1, "-o", "json"}, exitUsage, "USAGE"},
+		{"price_not_allowed_for_market", []string{"orders", "place", "--instrument", "SBER@TQBR", "--direction", "buy", "--quantity", "1", "--type", "market", "--price", "270.5", "--order-id", orderUUID1, "-o", "json"}, exitUsage, "USAGE"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

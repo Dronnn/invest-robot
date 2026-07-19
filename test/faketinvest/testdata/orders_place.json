@@ -2,8 +2,8 @@
   "ok": true,
   "data": {
     "order": {
-      "order_id": "ord-happy-1",
-      "client_order_id": "happy-1",
+      "order_id": "ord-550e8400-e29b-41d4-a716-446655440000",
+      "client_order_id": "550e8400-e29b-41d4-a716-446655440000",
       "lifecycle": "EXECUTION_REPORT_STATUS_FILL",
       "direction": "ORDER_DIRECTION_BUY",
       "order_type": "ORDER_TYPE_LIMIT",
