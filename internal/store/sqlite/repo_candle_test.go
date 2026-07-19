@@ -185,3 +185,106 @@ func TestCandleRepo_LatestComplete_NoneFound(t *testing.T) {
 		t.Error("LatestComplete: ok = true, want false with no candles")
 	}
 }
+
+// TestCandleRepo_LatestCompleteAsOf_Boundary proves the at-or-before-as_of
+// contract the cycle orchestrator's assemble step depends on: a bar exactly
+// at as_of is included (not excluded by a strict "<"), and a later bar must
+// not leak into the read. Note: candles carry a UNIQUE(instrument_uid,
+// interval, ts) constraint, so — unlike quotes/feature_snapshots — two candle
+// rows can never share a ts; there is no id-tie-break case to test here.
+func TestCandleRepo_LatestCompleteAsOf_Boundary(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	i := seedInstrument(t, db, "uid-1")
+	repo := CandleRepo{}
+	asOf := time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC)
+
+	atAsOf := testCandle(i.UID, asOf, true)
+	atAsOf.Close = model.MustDecimal("100")
+	if err := repo.Upsert(ctx, db, atAsOf); err != nil {
+		t.Fatalf("Upsert at as_of: %v", err)
+	}
+	after := testCandle(i.UID, asOf.Add(5*time.Minute), true)
+	after.Close = model.MustDecimal("200")
+	if err := repo.Upsert(ctx, db, after); err != nil {
+		t.Fatalf("Upsert after as_of: %v", err)
+	}
+
+	got, ok, err := repo.LatestCompleteAsOf(ctx, db, i.UID, model.Interval5m, asOf)
+	if err != nil {
+		t.Fatalf("LatestCompleteAsOf: %v", err)
+	}
+	if !ok {
+		t.Fatal("LatestCompleteAsOf: ok = false, want true")
+	}
+	if !got.TS.Equal(asOf) {
+		t.Errorf("LatestCompleteAsOf(asOf).TS = %v, want %v (a bar exactly at as_of must be included)", got.TS, asOf)
+	}
+	if got.Close.String() != "100" {
+		t.Errorf("LatestCompleteAsOf(asOf).Close = %s, want 100 (a bar after as_of must not leak)", got.Close)
+	}
+}
+
+// TestCandleRepo_LatestCompleteAsOf_IgnoresIncomplete proves the complete=1
+// filter still applies under an as-of read: an incomplete bar sitting right
+// at the boundary must not be returned in place of an earlier complete one.
+func TestCandleRepo_LatestCompleteAsOf_IgnoresIncomplete(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	i := seedInstrument(t, db, "uid-1")
+	repo := CandleRepo{}
+	asOf := time.Date(2026, 7, 19, 10, 5, 0, 0, time.UTC)
+	earlier := asOf.Add(-5 * time.Minute)
+
+	if err := repo.Upsert(ctx, db, testCandle(i.UID, earlier, true)); err != nil {
+		t.Fatalf("Upsert complete: %v", err)
+	}
+	if err := repo.Upsert(ctx, db, testCandle(i.UID, asOf, false)); err != nil {
+		t.Fatalf("Upsert incomplete at as_of: %v", err)
+	}
+
+	got, ok, err := repo.LatestCompleteAsOf(ctx, db, i.UID, model.Interval5m, asOf)
+	if err != nil {
+		t.Fatalf("LatestCompleteAsOf: %v", err)
+	}
+	if !ok {
+		t.Fatal("LatestCompleteAsOf: ok = false, want true")
+	}
+	if !got.TS.Equal(earlier) {
+		t.Errorf("LatestCompleteAsOf().TS = %v, want %v (the incomplete bar at as_of must not count)", got.TS, earlier)
+	}
+}
+
+func TestCandleRepo_LatestCompleteAsOf_BeforeAnyData(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	i := seedInstrument(t, db, "uid-1")
+	repo := CandleRepo{}
+	ts := time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC)
+
+	if err := repo.Upsert(ctx, db, testCandle(i.UID, ts, true)); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	_, ok, err := repo.LatestCompleteAsOf(ctx, db, i.UID, model.Interval5m, ts.Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("LatestCompleteAsOf: %v", err)
+	}
+	if ok {
+		t.Error("LatestCompleteAsOf(before any data): ok = true, want false")
+	}
+}
+
+func TestCandleRepo_LatestCompleteAsOf_NoneFound(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	i := seedInstrument(t, db, "uid-1")
+
+	_, ok, err := (CandleRepo{}).LatestCompleteAsOf(ctx, db, i.UID, model.Interval5m, time.Now())
+	if err != nil {
+		t.Fatalf("LatestCompleteAsOf: %v", err)
+	}
+	if ok {
+		t.Error("LatestCompleteAsOf: ok = true, want false with no candles")
+	}
+}

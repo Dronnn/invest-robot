@@ -93,6 +93,30 @@ func (CandleRepo) LatestComplete(ctx context.Context, q Querier, uid model.Instr
 	return c, true, nil
 }
 
+// LatestCompleteAsOf returns the most recent candle with complete = true for
+// uid/interval whose ts is at or before asOf. It is LatestComplete's
+// point-in-time counterpart: the cycle orchestrator's assemble step must read
+// market state strictly at-or-before the decision's as_of instant so a bar
+// that only became known after that instant can never leak into the
+// decision. ok is false if none exists.
+func (CandleRepo) LatestCompleteAsOf(ctx context.Context, q Querier, uid model.InstrumentUID, interval model.CandleInterval, asOf time.Time) (c model.Candle, ok bool, err error) {
+	row := q.QueryRowContext(ctx, `
+		SELECT instrument_uid, interval, open, high, low, close, volume, ts, complete
+		FROM candles
+		WHERE instrument_uid = ? AND interval = ? AND complete = 1 AND ts <= ?
+		ORDER BY ts DESC, id DESC LIMIT 1`,
+		string(uid), interval.String(), timeText(asOf),
+	)
+	c, err = scanCandle(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Candle{}, false, nil
+	}
+	if err != nil {
+		return model.Candle{}, false, fmt.Errorf("sqlite: latest complete candle as of %s %s %s: %w", uid, interval, asOf, err)
+	}
+	return c, true, nil
+}
+
 func scanCandle(s rowScanner) (model.Candle, error) {
 	var c model.Candle
 	var uid, interval, ts string

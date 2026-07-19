@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/Dronnn/invest-robot/internal/model"
 )
@@ -36,6 +37,24 @@ func (QuoteRepo) Latest(ctx context.Context, q Querier, uid model.InstrumentUID)
 	}
 	if err != nil {
 		return model.Quote{}, false, fmt.Errorf("sqlite: latest quote %s: %w", uid, err)
+	}
+	return quote, true, nil
+}
+
+// LatestAsOf returns the most recent quote for uid whose ts is at or before
+// asOf — Latest's point-in-time counterpart, for the cycle orchestrator's
+// assemble step to read market state strictly at-or-before the decision's
+// as_of instant with no future leakage. ok is false if none exists.
+func (QuoteRepo) LatestAsOf(ctx context.Context, q Querier, uid model.InstrumentUID, asOf time.Time) (quote model.Quote, ok bool, err error) {
+	row := q.QueryRowContext(ctx, `
+		SELECT instrument_uid, bid, ask, last, ts FROM quotes
+		WHERE instrument_uid = ? AND ts <= ? ORDER BY ts DESC, id DESC LIMIT 1`, string(uid), timeText(asOf))
+	quote, err = scanQuote(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Quote{}, false, nil
+	}
+	if err != nil {
+		return model.Quote{}, false, fmt.Errorf("sqlite: latest quote as of %s %s: %w", uid, asOf, err)
 	}
 	return quote, true, nil
 }
