@@ -689,6 +689,57 @@ func TestCheck_OverflowingCandidateQuantityDoesNotBypassNotional(t *testing.T) {
 	}
 }
 
+// --- currency gate ----------------------------------------------------------
+
+func TestCurrencyMismatch(t *testing.T) {
+	t.Run("strips orders on a non-base-currency instrument", func(t *testing.T) {
+		state := wideOpenState()
+		state.BaseCurrency = "RUB"
+		// uidB is quoted in USD while the account settles in RUB.
+		usd := instrument(uidB, "BBB", 1)
+		usd.Currency = "USD"
+		state.Instruments[uidB] = usd
+		state.Positions[uidB] = Position{QtyLots: 100, LastPrice: model.MustDecimal("50")}
+
+		actions := []model.Decision{buy(uidA, 1), buy(uidB, 1), sell(uidB, 1)}
+		res := Check(actions, state, wideOpenLimits())
+
+		if _, ok := allowedQty(t, res.Allowed, uidA); !ok {
+			t.Errorf("base-currency buy uidA should pass")
+		}
+		if _, ok := allowedQty(t, res.Allowed, uidB); ok {
+			t.Errorf("non-base-currency orders on uidB should be stripped")
+		}
+		for _, idx := range []int{1, 2} {
+			adjs := adjustmentFor(res, idx)
+			if len(adjs) != 1 || adjs[0].Rule != RuleCurrencyMismatch {
+				t.Errorf("index %d adjustments = %+v, want one strip tagged currency_mismatch", idx, adjs)
+			}
+		}
+	})
+
+	t.Run("case-insensitive base currency match passes", func(t *testing.T) {
+		state := wideOpenState() // instruments are Currency "RUB"
+		state.BaseCurrency = "rub"
+		res := Check([]model.Decision{buy(uidA, 1)}, state, wideOpenLimits())
+		if _, ok := allowedQty(t, res.Allowed, uidA); !ok {
+			t.Errorf("a matching currency (case-insensitive) must pass")
+		}
+	})
+
+	t.Run("empty base currency disables the check", func(t *testing.T) {
+		state := wideOpenState()
+		usd := instrument(uidA, "AAA", 1)
+		usd.Currency = "USD"
+		state.Instruments[uidA] = usd
+		// BaseCurrency left empty.
+		res := Check([]model.Decision{buy(uidA, 1)}, state, wideOpenLimits())
+		if _, ok := allowedQty(t, res.Allowed, uidA); !ok {
+			t.Errorf("an unset base currency must not enforce any currency check")
+		}
+	})
+}
+
 // --- rule 7: cash reserved for pending buys ---------------------------------
 
 func TestCashFloor_ReservesPendingBuys(t *testing.T) {

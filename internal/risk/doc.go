@@ -31,6 +31,12 @@
 //  8. oversell — shrinks or strips sells so total pending sells never exceed
 //     the position (Phase 1 forbids shorting)
 //
+// A currency gate runs right after the allowlist (rule 2): any order on an
+// instrument whose currency differs from the configured base currency is
+// stripped before the notional/cash rules can price it, since all arithmetic
+// here is single-currency and mixing currencies would compare incommensurable
+// figures. It is inert when no base currency is configured.
+//
 // Every modification — a full strip or a lot-quantity shrink — is recorded
 // as an Adjustment naming the rule that caused it; there is no silent
 // mutation. hold actions are never touched by rules 2-8 (they carry no risk

@@ -1,6 +1,8 @@
 package risk
 
 import (
+	"strings"
+
 	"github.com/Dronnn/invest-robot/internal/config"
 	"github.com/Dronnn/invest-robot/internal/model"
 )
@@ -23,6 +25,7 @@ func Check(actions []model.Decision, state State, limits config.RiskConfig) Resu
 	halted := applyKillSwitch(entries, state, maxDailyLoss, &adjustments)
 
 	applyAllowlist(entries, state, limits.Allowlist, &adjustments)
+	applyCurrencyMismatch(entries, state, &adjustments)
 	applyOrderCap(entries, limits.MaxOrdersPerCycle, RuleMaxOrdersPerCycle,
 		"per-cycle order cap reached", &adjustments)
 	applyOrderCap(entries, limits.MaxOrdersPerDay-state.OrdersToday, RuleMaxOrdersPerDay,
@@ -185,6 +188,35 @@ func applyAllowlist(entries []*entry, state State, allowlist []string, adjustmen
 			continue
 		}
 		strip(e, RuleAllowlist, "instrument not in configured allowlist", adjustments)
+	}
+}
+
+// applyCurrencyMismatch strips any order (buy/sell/close) on an instrument
+// whose currency differs from state.BaseCurrency. Every notional and cash
+// figure in this package is single-currency; an instrument settled in another
+// currency cannot be summed or compared against the base-currency limits
+// without silently mixing incommensurable amounts (booking a USD 100 fill as
+// RUB 100). The comparison is case-insensitive. An empty BaseCurrency disables
+// the check; an instrument with no known currency is left for the pricing rules
+// to handle as missing metadata, so this rule only ever acts on a known,
+// mismatched currency. Exits are stripped too — Phase 1 never enters a
+// non-base position (the buy is stripped here), and a mismatched exit cannot be
+// valued in the base currency any more safely than an entry.
+func applyCurrencyMismatch(entries []*entry, state State, adjustments *[]Adjustment) {
+	if state.BaseCurrency == "" {
+		return
+	}
+	for _, e := range entries {
+		if !e.live || !isOrder(e.dec.Action) {
+			continue
+		}
+		instr, ok := state.Instruments[e.dec.InstrumentUID]
+		if !ok || instr.Currency == "" {
+			continue // missing metadata: handled by the pricing rules
+		}
+		if !strings.EqualFold(instr.Currency, state.BaseCurrency) {
+			strip(e, RuleCurrencyMismatch, "instrument currency "+instr.Currency+" differs from base currency "+state.BaseCurrency, adjustments)
+		}
 	}
 }
 

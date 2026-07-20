@@ -42,6 +42,15 @@ type PendingIntents struct {
 // It is a snapshot the caller assembles from the portfolio and the latest
 // market data; risk holds no state of its own between calls.
 type State struct {
+	// BaseCurrency is the account's settlement currency (e.g. "rub"). Any
+	// action on an instrument quoted in a different currency is stripped: all
+	// of this package's notional/cash arithmetic is single-currency, so mixing
+	// currencies would silently compare and sum incommensurable figures
+	// (booking a USD 100 fill as RUB 100). An empty BaseCurrency disables the
+	// check — the caller must set it to enable currency enforcement; comparison
+	// is case-insensitive.
+	BaseCurrency string
+
 	// Cash is the account's free cash balance before this cycle's actions.
 	Cash model.Decimal
 
@@ -106,6 +115,7 @@ const (
 	RuleMaxTotalExposure    Rule = "max_total_exposure"
 	RuleCashFloor           Rule = "cash_floor"
 	RuleOversell            Rule = "oversell"
+	RuleCurrencyMismatch    Rule = "currency_mismatch"
 )
 
 // Adjustment is an audit record of one modification Check made to a
