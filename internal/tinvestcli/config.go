@@ -54,6 +54,12 @@ type Config struct {
 	// drifted CLI cannot be trusted for trading. Default {"1.49"}.
 	Contracts []string
 
+	// CLIVersions is an OPTIONAL exact allowlist for the CLI's own version
+	// string. The version legitimately varies across builds, so the default
+	// (nil/empty) allows any non-empty version; set it to pin specific builds.
+	// A handshake always requires a non-empty version regardless.
+	CLIVersions []string
+
 	// Stream supervision tuning (StreamMarketdata). Zero fields take defaults.
 	//
 	// StreamQueueSize is the bounded event-channel capacity. StreamLineLimit

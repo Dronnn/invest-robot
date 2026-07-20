@@ -53,6 +53,9 @@ func (c *Client) InstrumentGet(ctx context.Context, id string) (Instrument, erro
 	if err := decodeData(raw, &w); err != nil {
 		return Instrument{}, err
 	}
+	if w.Instrument.UID == "" {
+		return Instrument{}, incompletePayload("instruments get", "missing instrument uid")
+	}
 	return w.Instrument, nil
 }
 
@@ -106,6 +109,11 @@ func (c *Client) CandlesGet(ctx context.Context, id string, interval model.Candl
 	if err := decodeData(raw, &res); err != nil {
 		return CandlesResult{}, err
 	}
+	// An empty request echo means the CLI did not actually process the request; a
+	// bare {data:{}} must not decode as a valid empty-candle result.
+	if res.InstrumentUID == "" || res.Interval == "" {
+		return CandlesResult{}, incompletePayload("candles get", "missing instrument_uid/interval echo")
+	}
 	return res, nil
 }
 
@@ -139,6 +147,9 @@ func (c *Client) PortfolioGet(ctx context.Context, account string) (Portfolio, e
 	}
 	if err := decodeData(raw, &w); err != nil {
 		return Portfolio{}, err
+	}
+	if w.Portfolio.AccountID == "" {
+		return Portfolio{}, incompletePayload("portfolio get", "missing account_id")
 	}
 	return w.Portfolio, nil
 }
@@ -212,11 +223,24 @@ func (c *Client) OrdersPlace(ctx context.Context, req PlaceRequest) (Order, erro
 		argv = append(argv, "--tif", req.TimeInForce.String())
 	}
 	argv = append(argv, "--order-id", req.OrderID)
-	raw, _, err := c.call(ctx, callSpec{grp: groupOrders, argv: argv, timeout: c.cfg.Timeout, read: false, orderID: req.OrderID})
+	// If the child dies before the CLI emits its own hint, an outcome-unknown
+	// placement must be reconciled under the same profile/account it was sent on.
+	spec := callSpec{grp: groupOrders, argv: argv, timeout: c.cfg.Timeout, read: false,
+		reconcileHint: ReconcileHint{OrderID: req.OrderID, Command: c.scopedCommand(req.Account, "orders", "reconcile")}}
+	raw, _, err := c.call(ctx, spec)
 	if err != nil {
 		return Order{}, err
 	}
-	return decodeOrder(raw)
+	ord, err := decodeOrder(raw)
+	if err != nil {
+		return Order{}, err
+	}
+	// A placement that reports no order id did not actually place: never treat a
+	// bare {data:{}} as a successful order.
+	if ord.OrderID == "" {
+		return Order{}, incompletePayload("orders place", "missing order_id")
+	}
+	return ord, nil
 }
 
 // OrdersGet fetches one order's full state by its exchange order id.
@@ -232,19 +256,29 @@ func (c *Client) OrdersGet(ctx context.Context, account, orderID string) (OrderS
 	if err := decodeData(raw, &w); err != nil {
 		return OrderState{}, err
 	}
+	if w.Order.OrderID == "" {
+		return OrderState{}, incompletePayload("orders get", "missing order_id")
+	}
 	return w.Order, nil
 }
 
 // OrdersCancel cancels one order by id. It is a mutation and never retries.
 func (c *Client) OrdersCancel(ctx context.Context, account, orderID string) (CancelResult, error) {
 	argv := append(accountArgv("orders", "cancel", account), orderID)
-	raw, _, err := c.call(ctx, callSpec{grp: groupOrders, argv: argv, timeout: c.cfg.Timeout, read: false, orderID: orderID})
+	// An outcome-unknown cancel is recovered by re-reading the order's state, not
+	// by reconcile (the real CLI's cancel recovery is `orders get <exchange-id>`).
+	spec := callSpec{grp: groupOrders, argv: argv, timeout: c.cfg.Timeout, read: false,
+		reconcileHint: ReconcileHint{OrderID: orderID, Command: c.scopedCommand(account, "orders", "get", orderID)}}
+	raw, _, err := c.call(ctx, spec)
 	if err != nil {
 		return CancelResult{}, err
 	}
 	var res CancelResult
 	if err := decodeData(raw, &res); err != nil {
 		return CancelResult{}, err
+	}
+	if res.OrderID == "" {
+		return CancelResult{}, incompletePayload("orders cancel", "missing order_id")
 	}
 	return res, nil
 }
@@ -278,6 +312,17 @@ func (c *Client) OrdersReconcile(ctx context.Context, account string) (Reconcile
 	})
 	if err != nil {
 		return ReconcileResult{}, err
+	}
+	// The real renderer always emits an outcomes array (empty when nothing was
+	// unresolved); a bare {data:{}} lacking it is not a trustworthy zero state.
+	var probe struct {
+		Outcomes json.RawMessage `json:"outcomes"`
+	}
+	if err := decodeData(raw, &probe); err != nil {
+		return ReconcileResult{}, err
+	}
+	if probe.Outcomes == nil {
+		return ReconcileResult{}, incompletePayload("orders reconcile", "missing outcomes")
 	}
 	var res ReconcileResult
 	if err := decodeData(raw, &res); err != nil {
@@ -339,6 +384,13 @@ func decodeOrder(raw json.RawMessage) (Order, error) {
 		return Order{}, err
 	}
 	return w.Order, nil
+}
+
+// incompletePayload reports a ProtocolError for a success envelope whose data
+// decoded cleanly but is missing a field the command must always carry — the
+// guard against a bare {data:{}} silently decoding as a valid zero state.
+func incompletePayload(cmd, detail string) *ProtocolError {
+	return &ProtocolError{Reason: cmd + " returned an incomplete payload", Detail: detail}
 }
 
 // decodeData unmarshals an envelope data payload, reporting a malformed shape as

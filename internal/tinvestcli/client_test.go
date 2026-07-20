@@ -523,8 +523,9 @@ func TestMutationTimeoutIsOutcomeUnknown(t *testing.T) {
 	if !errors.As(err, &oue) {
 		t.Fatalf("post-spawn mutation kill must be *OutcomeUnknownError, got %T: %v", err, err)
 	}
-	if oue.ReconcileHint.OrderID != orderUUID1 || oue.ReconcileHint.Command != "tinvest orders reconcile" {
-		t.Fatalf("reconcile hint = %+v, want the client order id and reconcile command", oue.ReconcileHint)
+	// The synthesized recovery hint is scoped to the account the order was sent on.
+	if oue.ReconcileHint.OrderID != orderUUID1 || oue.ReconcileHint.Command != "tinvest --account test-timeout orders reconcile" {
+		t.Fatalf("reconcile hint = %+v, want the client order id and account-scoped reconcile command", oue.ReconcileHint)
 	}
 }
 
@@ -547,6 +548,141 @@ func TestReadTimeoutIsNetworkError(t *testing.T) {
 	if !errors.As(err, &ne) || !ne.Timeout {
 		t.Fatalf("read timeout must be a *NetworkError with Timeout=true, got %T: %v", err, err)
 	}
+}
+
+// TestMutationParentCancelIsOutcomeUnknown proves that cancelling the parent
+// context of an in-flight mutation surfaces OutcomeUnknownError (the order may
+// have reached the broker), not a bare context error.
+func TestMutationParentCancelIsOutcomeUnknown(t *testing.T) {
+	dir := writeScenario(t, map[string]string{
+		"scenario.toml": "account_id = \"test-cancel\"\n" +
+			"default_latency_ms = 5000\n" +
+			"[[instruments]]\nuid = \"" + sberUID + "\"\nticker = \"SBER\"\nclass_code = \"TQBR\"\n" +
+			"lot = 10\ncurrency = \"rub\"\nlast_price = \"270.5\"\nlast_price_time = \"2026-07-19T10:00:00Z\"\n",
+	})
+	c := newClient(t, dir, t.TempDir(), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(100 * time.Millisecond); cancel() }()
+
+	price := model.MustDecimal("270.5")
+	_, err := c.OrdersPlace(ctx, PlaceRequest{
+		Account: "test-cancel", InstrumentID: "SBER@TQBR", Direction: model.SideBuy,
+		Quantity: 1, Type: model.OrderLimit, LimitPrice: &price, TimeInForce: model.TIFDay,
+		OrderID: orderUUID1,
+	})
+	var oue *OutcomeUnknownError
+	if !errors.As(err, &oue) {
+		t.Fatalf("parent-cancel of an in-flight mutation must be *OutcomeUnknownError, got %T: %v", err, err)
+	}
+	if oue.ReconcileHint.Command != "tinvest --account test-cancel orders reconcile" {
+		t.Fatalf("reconcile hint command = %q, want the account-scoped reconcile", oue.ReconcileHint.Command)
+	}
+}
+
+// TestCancelTimeoutHintIsScopedOrdersGet proves an outcome-unknown cancel is
+// recovered by a profile/account-scoped `orders get <exchange-id>`, not reconcile.
+func TestCancelTimeoutHintIsScopedOrdersGet(t *testing.T) {
+	dir := writeScenario(t, map[string]string{
+		"scenario.toml": "account_id = \"test-cancel\"\ndefault_latency_ms = 5000\n",
+	})
+	c := newClient(t, dir, t.TempDir(), func(cfg *Config) {
+		cfg.Profile = "live"
+		cfg.Timeout = 50 * time.Millisecond
+		cfg.KillGrace = 50 * time.Millisecond
+	})
+	_, err := c.OrdersCancel(context.Background(), "test-cancel", "ord-xyz")
+	var oue *OutcomeUnknownError
+	if !errors.As(err, &oue) {
+		t.Fatalf("post-spawn cancel kill must be *OutcomeUnknownError, got %T: %v", err, err)
+	}
+	if oue.ReconcileHint.Command != "tinvest --profile live --account test-cancel orders get ord-xyz" {
+		t.Fatalf("hint command = %q, want a scoped orders-get recovery", oue.ReconcileHint.Command)
+	}
+	if oue.ReconcileHint.OrderID != "ord-xyz" {
+		t.Fatalf("hint order id = %q, want the exchange order id", oue.ReconcileHint.OrderID)
+	}
+}
+
+// TestRequiredFieldsRejectEmptyPayload proves a bare {data:{}} success envelope
+// is rejected as a ProtocolError rather than decoding as a valid zero state.
+func TestRequiredFieldsRejectEmptyPayload(t *testing.T) {
+	dir := writeScenario(t, map[string]string{
+		"scenario.toml": "account_id = \"test-empty\"\n[responses]\n" +
+			"portfolio = \"empty.json\"\norders_reconcile = \"empty.json\"\norders_get = \"empty.json\"\n",
+		"empty.json": `{}`,
+	})
+	c := newClient(t, dir, t.TempDir(), nil)
+	ctx := context.Background()
+	isProto := func(err error) bool {
+		var pe *ProtocolError
+		return errors.As(err, &pe)
+	}
+	if _, err := c.PortfolioGet(ctx, "test-empty"); !isProto(err) {
+		t.Fatalf("empty portfolio must be *ProtocolError, got %T: %v", err, err)
+	}
+	if _, err := c.OrdersReconcile(ctx, "test-empty"); !isProto(err) {
+		t.Fatalf("empty reconcile must be *ProtocolError, got %T: %v", err, err)
+	}
+	if _, err := c.OrdersGet(ctx, "test-empty", "ord-1"); !isProto(err) {
+		t.Fatalf("empty orders get must be *ProtocolError, got %T: %v", err, err)
+	}
+}
+
+// TestHandshakeRejectsCLIVersion proves the optional CLI-version allowlist is
+// enforced when configured.
+func TestHandshakeRejectsCLIVersion(t *testing.T) {
+	c := newClient(t, shippedScenario(t, "happy"), t.TempDir(), func(cfg *Config) {
+		cfg.CLIVersions = []string{"9.9.9"}
+	})
+	info, err := c.Handshake(context.Background())
+	var he *HandshakeError
+	if !errors.As(err, &he) {
+		t.Fatalf("want *HandshakeError for a CLI version outside the allowlist, got %T: %v", err, err)
+	}
+	if info.Version != "0.1.0" {
+		t.Fatalf("rejected handshake should still report the observed version: %+v", info)
+	}
+}
+
+// TestStopOrderFullDecode proves the stop-order DTO mirrors the real renderer:
+// quantity, class code, exchange type/id, trailing data, take-profit type, and
+// dates all decode rather than being silently dropped.
+func TestStopOrderFullDecode(t *testing.T) {
+	so := `{"stop_order_id":"so-1","status":"STOP_ORDER_STATUS_ACTIVE",` +
+		`"direction":"STOP_ORDER_DIRECTION_SELL","stop_order_type":"STOP_ORDER_TYPE_STOP_LOSS",` +
+		`"exchange_order_type":"EXCHANGE_ORDER_TYPE_MARKET","quantity":3,` +
+		`"instrument_uid":"u1","ticker":"SBER","class_code":"TQBR","currency":"rub",` +
+		`"stop_price":{"units":"260","nano":0,"value":"260","currency":"rub"},` +
+		`"take_profit_type":"TAKE_PROFIT_TYPE_REGULAR","exchange_order_id":"ex-9",` +
+		`"create_date":"2026-07-19T09:00:00Z","activation_date_time":"2026-07-19T09:05:00Z",` +
+		`"trailing":{"indent":{"value":"1"},"indent_type":"TRAILING_VALUE_ABSOLUTE","status":"TRAILING_STOP_STATUS_ACTIVE"}}`
+	dir := writeScenario(t, map[string]string{
+		"scenario.toml": "account_id = \"test-so\"\n[responses]\nstop_orders = \"stop.json\"\n",
+		"stop.json":     `{"stop_orders":[` + so + `]}`,
+	})
+	c := newClient(t, dir, t.TempDir(), nil)
+	stops, err := c.StopOrdersList(context.Background(), "test-so")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stops) != 1 {
+		t.Fatalf("want 1 stop order, got %d", len(stops))
+	}
+	s := stops[0]
+	if s.Quantity != 3 || s.ClassCode != "TQBR" || s.ExchangeOrderType != "EXCHANGE_ORDER_TYPE_MARKET" {
+		t.Fatalf("core fields lost: %+v", s)
+	}
+	if s.ExchangeOrderID != "ex-9" || s.TakeProfitType != "TAKE_PROFIT_TYPE_REGULAR" {
+		t.Fatalf("exchange id / take-profit lost: %+v", s)
+	}
+	if !s.CreateDate.Equal(time.Date(2026, 7, 19, 9, 0, 0, 0, time.UTC)) {
+		t.Fatalf("create_date = %v", s.CreateDate)
+	}
+	if s.Trailing == nil || s.Trailing.IndentType != "TRAILING_VALUE_ABSOLUTE" {
+		t.Fatalf("trailing data lost: %+v", s.Trailing)
+	}
+	eqMoney(t, s.StopPrice, "260", "rub")
+	eqDec(t, s.Trailing.Indent.Amount, "1")
 }
 
 func TestHostileRateLimitHonoredAndCapped(t *testing.T) {
@@ -702,7 +838,7 @@ func TestOperationsServiceSerialized(t *testing.T) {
 		"scenario.toml": "account_id = \"test-ops\"\n" +
 			"default_latency_ms = 150\n" +
 			"[responses]\nportfolio = \"portfolio.json\"\noperations = \"operations.json\"\n",
-		"portfolio.json":  `{"account_id":"test-ops","total_amount_portfolio":{"value":"1","currency":"rub"},"positions":[]}`,
+		"portfolio.json":  `{"portfolio":{"account_id":"test-ops","total_amount_portfolio":{"value":"1","currency":"rub"},"positions":[]}}`,
 		"operations.json": `{"operations":[],"next_cursor":""}`,
 	})
 	c := newClient(t, dir, t.TempDir(), nil)

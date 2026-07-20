@@ -399,19 +399,41 @@ type ReconcileResult struct {
 	UnresolvedCount int                `json:"unresolved_count"`
 }
 
-// StopOrder is one row of `stop-orders list`. It mirrors render.StopOrderView,
-// whose lifecycle field is named status (a distinct enum from an order's
-// lifecycle); reading it as lifecycle silently drops the stop order's state.
-// The Phase-1 robot only lists stop orders, so extra renderer fields are left
-// undecoded.
+// StopOrder is one row of `stop-orders list`. It mirrors render.StopOrderView
+// field for field: its state is named status (a distinct enum from an order's
+// lifecycle), and it carries the requested quantity, class code, exchange
+// order type/id, trailing parameters, take-profit type, and lifecycle dates —
+// dropping any of these loses contract data.
 type StopOrder struct {
-	StopOrderID   string `json:"stop_order_id"`
-	Status        string `json:"status"`
-	Direction     string `json:"direction"`
-	StopOrderType string `json:"stop_order_type"`
-	InstrumentUID string `json:"instrument_uid"`
-	Ticker        string `json:"ticker"`
-	Currency      string `json:"currency"`
-	Price         *Money `json:"price"`
-	StopPrice     *Money `json:"stop_price"`
+	StopOrderID        string             `json:"stop_order_id"`
+	Status             string             `json:"status"`
+	Direction          string             `json:"direction"`
+	StopOrderType      string             `json:"stop_order_type"`
+	ExchangeOrderType  string             `json:"exchange_order_type"`
+	Quantity           int64              `json:"quantity"`
+	InstrumentUID      string             `json:"instrument_uid"`
+	Ticker             string             `json:"ticker"`
+	ClassCode          string             `json:"class_code"`
+	Currency           string             `json:"currency"`
+	Price              *Money             `json:"price"`
+	StopPrice          *Money             `json:"stop_price"`
+	TakeProfitType     string             `json:"take_profit_type"`
+	Trailing           *StopOrderTrailing `json:"trailing"`
+	ExchangeOrderID    string             `json:"exchange_order_id"`
+	CreateDate         time.Time          `json:"create_date"`
+	ActivationDateTime time.Time          `json:"activation_date_time"`
+	ExpirationTime     time.Time          `json:"expiration_time"`
+}
+
+// StopOrderTrailing mirrors render.TrailingView: a trailing take-profit's
+// parameters and live state. Decimal fields are pointers because the CLI omits
+// them until known.
+type StopOrderTrailing struct {
+	Indent     *Money `json:"indent"`
+	IndentType string `json:"indent_type"`
+	Spread     *Money `json:"spread"`
+	SpreadType string `json:"spread_type"`
+	Status     string `json:"status"`
+	Price      *Money `json:"price"`
+	Extremum   *Money `json:"extremum"`
 }

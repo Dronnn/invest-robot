@@ -147,6 +147,15 @@ func (c *Client) Handshake(ctx context.Context) (Info, error) {
 			Info:   info,
 		}
 	}
+	if vd.Version == "" {
+		return info, &HandshakeError{Reason: "version reported an empty CLI version", Info: info}
+	}
+	if len(c.cfg.CLIVersions) > 0 && !slices.Contains(c.cfg.CLIVersions, vd.Version) {
+		return info, &HandshakeError{
+			Reason: fmt.Sprintf("CLI version %q not in allowlist %v", vd.Version, c.cfg.CLIVersions),
+			Info:   info,
+		}
+	}
 	if meta.SchemaVersion != vd.SchemaVersion {
 		return info, &HandshakeError{
 			Reason: fmt.Sprintf("schema_version mismatch: data %q vs meta %q", vd.SchemaVersion, meta.SchemaVersion),
@@ -186,25 +195,58 @@ type callSpec struct {
 	read                bool          // read calls may retry on NetworkError/RateLimitError
 	allowReconcileExit1 bool          // treat exit 1 + ok:true as success (reconcile)
 	skipSchema          bool          // handshake-only: defer the schema check to the caller
-	// orderID is the client/exchange order id a mutation carries, used only to
-	// populate the reconcile hint when a post-spawn local failure leaves the
-	// outcome unknown. Empty for reads and non-order mutations.
-	orderID string
+	// reconcileHint is the correctly-scoped recovery instruction a mutation
+	// carries, used when a post-spawn local failure leaves the outcome unknown
+	// before the CLI could emit its own hint. Empty for reads.
+	reconcileHint ReconcileHint
 }
 
-// reconcileCommand is the recovery command a mutation with an unknown outcome
-// must run before any further mutation (DESIGN §4).
-const reconcileCommand = "tinvest orders reconcile"
-
 // outcomeUnknown builds the error for a mutation whose child was spawned but
-// whose outcome could not be confirmed locally (a timeout/kill after start):
-// the order may have reached the broker, so it must be frozen and reconciled,
-// never retried.
+// whose outcome could not be confirmed locally (a timeout/kill/cancellation
+// after start): the order may have reached the broker, so it must be frozen and
+// reconciled, never retried. It carries the spec's correctly-scoped recovery
+// hint, falling back to a bare reconcile only if the caller set none.
 func (c *Client) outcomeUnknown(spec callSpec, msg string) *OutcomeUnknownError {
+	hint := spec.reconcileHint
+	if hint.Command == "" {
+		hint.Command = c.scopedCommand("", "orders", "reconcile")
+	}
 	return &OutcomeUnknownError{
 		BrokerError:   BrokerError{Message: msg, Phase: "sent_unconfirmed"},
-		ReconcileHint: ReconcileHint{OrderID: spec.orderID, Command: reconcileCommand},
+		ReconcileHint: hint,
 	}
+}
+
+// scopedCommand renders a profile/account-scoped recovery command exactly as the
+// real CLI does (cmd/tinvest scopedBrokerCommand): `tinvest [--profile P]
+// [--account A] <args...>` with the same shell quoting, so the hint can be run
+// verbatim under the same scope the failed call used.
+func (c *Client) scopedCommand(account string, args ...string) string {
+	parts := []string{"tinvest"}
+	if c.cfg.Profile != "" {
+		parts = append(parts, "--profile", shellCommandArg(c.cfg.Profile))
+	}
+	if account != "" {
+		parts = append(parts, "--account", shellCommandArg(account))
+	}
+	for _, a := range args {
+		parts = append(parts, shellCommandArg(a))
+	}
+	return strings.Join(parts, " ")
+}
+
+// shellCommandArg quotes a command argument the way the real CLI does: bare when
+// it contains only shell-safe characters, single-quoted (with embedded quotes
+// escaped) otherwise.
+func shellCommandArg(arg string) string {
+	safe := func(r rune) bool {
+		return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || strings.ContainsRune("_./:@+-", r)
+	}
+	if arg != "" && strings.IndexFunc(arg, func(r rune) bool { return !safe(r) }) == -1 {
+		return arg
+	}
+	return "'" + strings.ReplaceAll(arg, "'", "'\"'\"'") + "'"
 }
 
 // call runs one CLI call to completion under its method-group lock, applying the

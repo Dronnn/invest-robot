@@ -49,9 +49,13 @@ func (c *Client) runProcess(ctx context.Context, spec callSpec, argv []string) (
 	}
 	waitErr := cmd.Wait()
 
-	// Parent cancellation takes precedence and is returned as-is (not a broker
-	// error): the caller asked us to stop.
+	// Parent cancellation after the child started: for a read the caller asked us
+	// to stop, so return ctx.Err() as-is; for a mutation the request may already
+	// have reached the broker, so its outcome is unknown and must be reconciled.
 	if ctx.Err() != nil {
+		if !spec.read {
+			return execResult{}, c.outcomeUnknown(spec, "tinvest mutation canceled after the child started; outcome unknown")
+		}
 		return execResult{}, ctx.Err()
 	}
 	// Our own backstop fired after the child started. For a read this is a
