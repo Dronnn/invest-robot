@@ -9,6 +9,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -414,6 +417,315 @@ func TestApplyMigrations_UpgradeFromRestoredV1(t *testing.T) {
 	// The new unique index enforces one fill per intent.
 	if _, err := db.ExecContext(ctx, `INSERT INTO fills (order_intent_id, price, qty, fee, ts) VALUES ('intent-1', '101', 1, '0.1', ?)`, now); err == nil {
 		t.Error("expected a second fill for the same intent to violate the new UNIQUE(order_intent_id) index, got nil error")
+	}
+}
+
+// TestApplyMigrations_UpgradeFromLegacyV1Checksum builds a database whose
+// version 1 was applied against the amended-v1 schema (order_intents.reason,
+// fills.realized_pnl and fills.low_fidelity already inline — the shape that
+// shipped briefly between commits f350897 and 1021436, recording
+// legacyV1Checksum) and proves the real embedded migrations upgrade it
+// cleanly: migration 2 runs its legacy substitute SQL (only the unique
+// index; the three columns already exist), the recorded version-2 checksum
+// is the canonical one so a later reopen looks identical to the clean path,
+// pre-existing data survives, the unique index is enforced, and the
+// resulting order_intents/fills schema matches a fresh clean-path database
+// column-for-column and index-for-index.
+func TestApplyMigrations_UpgradeFromLegacyV1Checksum(t *testing.T) {
+	ctx := context.Background()
+
+	amendedV1SQL, err := os.ReadFile(filepath.Join("testdata", "migrate", "legacy_v1_amended.sql"))
+	if err != nil {
+		t.Fatalf("read legacy v1 fixture: %v", err)
+	}
+	legacyV1 := testMigration(1, "init", string(amendedV1SQL))
+	if legacyV1.checksum != legacyV1Checksum {
+		t.Fatalf("legacy_v1_amended.sql checksum = %s, want legacyV1Checksum %s (migrate.go's constant and the fixture have drifted apart)",
+			legacyV1.checksum, legacyV1Checksum)
+	}
+
+	db := rawTestDB(t)
+	if _, err := db.ExecContext(ctx, createSchemaMigrationsTable); err != nil {
+		t.Fatalf("create schema_migrations: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, legacyV1.sql); err != nil {
+		t.Fatalf("apply amended v1 schema: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO schema_migrations (version, checksum, applied_at) VALUES (1, ?, ?)`,
+		legacyV1Checksum, timeText(fixedNow())); err != nil {
+		t.Fatalf("record legacy v1 as applied: %v", err)
+	}
+
+	// Seed data in the amended-v1 shape: reason/realized_pnl/low_fidelity are
+	// already real columns here (unlike the restored-v1 fixture above), so
+	// give them values to prove they survive the upgrade untouched too.
+	now := timeText(fixedNow())
+	if _, err := db.ExecContext(ctx, `INSERT INTO instruments (uid, figi, ticker, class_code, lot, min_price_increment, currency, name, cached_at)
+		VALUES ('uid-1', 'figi-1', 'TICK', 'TQBR', 10, '0.01', 'RUB', 'Test', ?)`, now); err != nil {
+		t.Fatalf("seed instrument: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO cycles (started_at, as_of, mode, engine, engine_version, prompt_template_hash, config_snapshot, status)
+		VALUES (?, ?, 'paper', 'rules', 'v1', 'hash', '{}', 'done')`, now, now); err != nil {
+		t.Fatalf("seed cycle: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO decisions (cycle_id, instrument_uid, action, qty, order_type, time_in_force, rationale, confidence, validation_status)
+		VALUES (1, 'uid-1', 'buy', 1, 'market', 'day', 'because', 1.0, 'ok')`); err != nil {
+		t.Fatalf("seed decision: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO order_intents (client_order_id, decision_id, instrument_uid, side, qty, type, time_in_force, state, reason, created_at, updated_at)
+		VALUES ('intent-1', 1, 'uid-1', 'buy', 1, 'market', 'day', 'filled', 'because', ?, ?)`, now, now); err != nil {
+		t.Fatalf("seed order intent (amended v1 shape, reason already a real column): %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO fills (order_intent_id, price, qty, fee, ts, realized_pnl, low_fidelity) VALUES ('intent-1', '100', 1, '0.1', ?, '5', 1)`, now); err != nil {
+		t.Fatalf("seed fill (amended v1 shape, realized_pnl/low_fidelity already real columns): %v", err)
+	}
+
+	migs, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("loadMigrations: %v", err)
+	}
+	if err := applyMigrations(ctx, db, migs, fixedNow); err != nil {
+		t.Fatalf("upgrade legacy-checksum v1 to latest: %v", err)
+	}
+
+	var maxVersion int
+	if err := db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&maxVersion); err != nil {
+		t.Fatalf("query version: %v", err)
+	}
+	if want := migs[len(migs)-1].version; maxVersion != want {
+		t.Errorf("version after upgrade = %d, want %d", maxVersion, want)
+	}
+
+	var v2Checksum string
+	if err := db.QueryRowContext(ctx, `SELECT checksum FROM schema_migrations WHERE version = 2`).Scan(&v2Checksum); err != nil {
+		t.Fatalf("read recorded v2 checksum: %v", err)
+	}
+	var canonicalV2 migration
+	for _, m := range migs {
+		if m.version == 2 {
+			canonicalV2 = m
+		}
+	}
+	if v2Checksum != canonicalV2.checksum {
+		t.Errorf("recorded v2 checksum = %s, want the canonical migration 2 checksum %s (so a later reopen matches the clean path)", v2Checksum, canonicalV2.checksum)
+	}
+
+	// Pre-existing rows, including the columns the amended v1 already had,
+	// survived the upgrade untouched.
+	var reason, price string
+	var lowFidelity int
+	var realizedPnL string
+	if err := db.QueryRowContext(ctx, `SELECT reason FROM order_intents WHERE client_order_id = 'intent-1'`).Scan(&reason); err != nil {
+		t.Fatalf("read order intent after upgrade: %v", err)
+	}
+	if reason != "because" {
+		t.Errorf("order_intents.reason after upgrade = %q, want because", reason)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT price, low_fidelity, realized_pnl FROM fills WHERE order_intent_id = 'intent-1'`).
+		Scan(&price, &lowFidelity, &realizedPnL); err != nil {
+		t.Fatalf("read fill after upgrade: %v", err)
+	}
+	if price != "100" || lowFidelity != 1 || realizedPnL != "5" {
+		t.Errorf("fill after upgrade = {price:%s low_fidelity:%d realized_pnl:%s}, want {100 1 5}", price, lowFidelity, realizedPnL)
+	}
+
+	// The unique index exists and is enforced, same as the clean path.
+	if _, err := db.ExecContext(ctx, `INSERT INTO fills (order_intent_id, price, qty, fee, ts) VALUES ('intent-1', '101', 1, '0.1', ?)`, now); err == nil {
+		t.Error("expected a second fill for the same intent to violate the unique index, got nil error")
+	}
+
+	// The legacy-upgrade path converges to the same schema shape as a clean
+	// Open() through the canonical migrations, column-for-column and
+	// index-for-index. Comparing via PRAGMA table_info/index_info rather than
+	// sqlite_master text: ALTER TABLE ADD COLUMN does not necessarily leave
+	// sqlite_master.sql byte-identical to a table whose column was authored
+	// inline, even though the resulting schema is equivalent.
+	clean := openTest(t)
+	for _, table := range []string{"order_intents", "fills"} {
+		gotCols, wantCols := columnInfoRows(t, db, table), columnInfoRows(t, clean.DB, table)
+		if !slices.Equal(gotCols, wantCols) {
+			t.Errorf("%s columns after legacy upgrade = %v, want %v (clean-path shape)", table, gotCols, wantCols)
+		}
+		gotIdx, wantIdx := indexInfoRows(t, db, table), indexInfoRows(t, clean.DB, table)
+		if !slices.Equal(gotIdx, wantIdx) {
+			t.Errorf("%s indexes after legacy upgrade = %v, want %v (clean-path shape)", table, gotIdx, wantIdx)
+		}
+	}
+}
+
+// columnInfoRows returns table's columns (name, declared type, notnull,
+// default, pk) via PRAGMA table_info, normalized into comparable strings and
+// name-sorted. Sorted, not positional: ALTER TABLE ADD COLUMN always appends
+// the new column at the end, so the legacy-checksum upgrade path (reason
+// authored inline in CREATE TABLE) and the clean path (reason added via
+// ALTER TABLE) never share physical column order even when the column set is
+// identical — cosmetic position isn't the invariant under test here.
+func columnInfoRows(t *testing.T, db *sql.DB, table string) []string {
+	t.Helper()
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(%s): %v", table, err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			t.Fatalf("scan table_info(%s): %v", table, err)
+		}
+		out = append(out, fmt.Sprintf("%s|%s|notnull=%d|default=%s|pk=%d", name, ctype, notNull, dflt.String, pk))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("table_info(%s) rows: %v", table, err)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// indexInfoRows returns every index on table as "unique=0/1 cols=[...]",
+// name-sorted so index shape (not the arbitrary index name) drives the
+// comparison.
+func indexInfoRows(t *testing.T, db *sql.DB, table string) []string {
+	t.Helper()
+	rows, err := db.Query(`PRAGMA index_list(` + table + `)`)
+	if err != nil {
+		t.Fatalf("PRAGMA index_list(%s): %v", table, err)
+	}
+	type namedIndex struct {
+		name   string
+		unique int
+	}
+	var idxs []namedIndex
+	for rows.Next() {
+		var seq, unique, partial int
+		var name, origin string
+		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+			rows.Close()
+			t.Fatalf("scan index_list(%s): %v", table, err)
+		}
+		idxs = append(idxs, namedIndex{name: name, unique: unique})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatalf("index_list(%s) rows: %v", table, err)
+	}
+	rows.Close()
+
+	var out []string
+	for _, ix := range idxs {
+		cols, err := db.Query(`PRAGMA index_info(` + ix.name + `)`)
+		if err != nil {
+			t.Fatalf("PRAGMA index_info(%s): %v", ix.name, err)
+		}
+		var colNames []string
+		for cols.Next() {
+			var seqno, cid int
+			var cname string
+			if err := cols.Scan(&seqno, &cid, &cname); err != nil {
+				cols.Close()
+				t.Fatalf("scan index_info(%s): %v", ix.name, err)
+			}
+			colNames = append(colNames, cname)
+		}
+		if err := cols.Err(); err != nil {
+			cols.Close()
+			t.Fatalf("index_info(%s) rows: %v", ix.name, err)
+		}
+		cols.Close()
+		out = append(out, fmt.Sprintf("unique=%d cols=%v", ix.unique, colNames))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestApplyMigrations_Migration2_RejectsDuplicateFillsWithActionableError
+// proves the precondition guarding migration 2's UNIQUE(order_intent_id)
+// index: a published-v1 database that already has more than one fill row
+// for the same intent must fail startup with a clear, actionable error
+// (naming the offending intent and stating the remedy) instead of aborting
+// on an opaque SQLite constraint violation, and must not partially apply the
+// migration or silently repair the duplicates.
+func TestApplyMigrations_Migration2_RejectsDuplicateFillsWithActionableError(t *testing.T) {
+	ctx := context.Background()
+	db := rawTestDB(t)
+
+	migs, err := loadMigrations()
+	if err != nil {
+		t.Fatalf("loadMigrations: %v", err)
+	}
+	var v1 migration
+	haveV1 := false
+	for _, m := range migs {
+		if m.version == 1 {
+			v1, haveV1 = m, true
+			break
+		}
+	}
+	if !haveV1 {
+		t.Fatal("migration version 1 not found among embedded migrations")
+	}
+	if err := applyMigrations(ctx, db, []migration{v1}, fixedNow); err != nil {
+		t.Fatalf("apply v1 alone: %v", err)
+	}
+
+	now := timeText(fixedNow())
+	if _, err := db.ExecContext(ctx, `INSERT INTO instruments (uid, figi, ticker, class_code, lot, min_price_increment, currency, name, cached_at)
+		VALUES ('uid-1', 'figi-1', 'TICK', 'TQBR', 10, '0.01', 'RUB', 'Test', ?)`, now); err != nil {
+		t.Fatalf("seed instrument: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO cycles (started_at, as_of, mode, engine, engine_version, prompt_template_hash, config_snapshot, status)
+		VALUES (?, ?, 'paper', 'rules', 'v1', 'hash', '{}', 'done')`, now, now); err != nil {
+		t.Fatalf("seed cycle: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO decisions (cycle_id, instrument_uid, action, qty, order_type, time_in_force, rationale, confidence, validation_status)
+		VALUES (1, 'uid-1', 'buy', 1, 'market', 'day', 'because', 1.0, 'ok')`); err != nil {
+		t.Fatalf("seed decision: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO order_intents (client_order_id, decision_id, instrument_uid, side, qty, type, time_in_force, state, created_at, updated_at)
+		VALUES ('dup-intent', 1, 'uid-1', 'buy', 1, 'market', 'day', 'filled', ?, ?)`, now, now); err != nil {
+		t.Fatalf("seed order intent: %v", err)
+	}
+	// Two fills for the same intent — legal under the restored v1 schema,
+	// which is exactly the gap migration 2's unique index closes.
+	if _, err := db.ExecContext(ctx, `INSERT INTO fills (order_intent_id, price, qty, fee, ts) VALUES ('dup-intent', '100', 1, '0.1', ?)`, now); err != nil {
+		t.Fatalf("seed first duplicate fill: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO fills (order_intent_id, price, qty, fee, ts) VALUES ('dup-intent', '101', 1, '0.1', ?)`, now); err != nil {
+		t.Fatalf("seed second duplicate fill: %v", err)
+	}
+
+	err = applyMigrations(ctx, db, migs, fixedNow)
+	if err == nil {
+		t.Fatal("expected applying migration 2 to fail on a database with duplicate fills, got nil error")
+	}
+	if !strings.Contains(err.Error(), "dup-intent") {
+		t.Errorf("error %q does not name the offending order_intent_id (dup-intent)", err.Error())
+	}
+	lower := strings.ToLower(err.Error())
+	if !strings.Contains(lower, "delete") && !strings.Contains(lower, "recreate") {
+		t.Errorf("error %q does not state the paper-mode remedy (delete/recreate)", err.Error())
+	}
+
+	// Migration 2 must not have partially applied, and the duplicates must
+	// not have been silently repaired.
+	var v2Count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = 2`).Scan(&v2Count); err != nil {
+		t.Fatalf("query schema_migrations: %v", err)
+	}
+	if v2Count != 0 {
+		t.Errorf("schema_migrations has %d rows for version 2, want 0 (a failed precondition must not record the migration as applied)", v2Count)
+	}
+	var fillCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fills WHERE order_intent_id = 'dup-intent'`).Scan(&fillCount); err != nil {
+		t.Fatalf("count fills: %v", err)
+	}
+	if fillCount != 2 {
+		t.Errorf("fills for dup-intent = %d, want 2 (no automatic repair)", fillCount)
 	}
 }
 

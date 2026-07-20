@@ -86,6 +86,91 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     applied_at TEXT NOT NULL
 );`
 
+// legacyV1Checksum is the sha256 of migration 1's SQL as it existed between
+// commits f350897 and 1021436, before 0001_init.sql was restored to its
+// originally published shape. For that window, order_intents.reason,
+// fills.realized_pnl and fills.low_fidelity were folded directly into v1;
+// they now live in migration 2 instead. A database created against that
+// intermediate schema recorded this checksum for version 1 and would
+// otherwise fail the checksum check below and refuse to open. The runner
+// accepts it as an equivalent legacy variant of version 1 and, when it sees
+// this checksum, runs legacyV1UpgradeTo2SQL for migration 2 instead of 2's
+// canonical SQL — the three columns already exist there, so only the unique
+// index is still missing. Either path records migration 2's canonical
+// checksum, so the two upgrade routes converge to the same recorded state.
+const legacyV1Checksum = "14a25973da9a9f34dec118f569401835018489871ca5eb49d190876979775d05"
+
+// legacyV1UpgradeTo2SQL is what migration 2 runs against a legacyV1Checksum
+// database in place of its canonical SQL (see legacyV1Checksum).
+const legacyV1UpgradeTo2SQL = `CREATE UNIQUE INDEX idx_fills_order_intent_unique ON fills (order_intent_id);`
+
+// migrationPrecondition validates data-dependent invariants immediately
+// before a specific pending migration is applied — checks too dependent on
+// existing row contents to express as schema DDL or a CHECK constraint.
+// Returning an error aborts startup before the migration's DDL runs; the
+// caller rolls back the transaction the precondition ran in.
+type migrationPrecondition func(ctx context.Context, tx *sql.Tx) error
+
+var migrationPreconditions = map[int]migrationPrecondition{
+	2: checkNoDuplicateFillsPerIntent,
+}
+
+// checkNoDuplicateFillsPerIntent guards migration 2's
+// UNIQUE(order_intent_id) index on fills. A published-v1 database (canonical
+// or the legacyV1Checksum variant) that somehow accumulated more than one
+// fill row for the same order intent would otherwise abort partway through
+// migration 2 with an opaque SQLite constraint-violation error. Fail fast
+// instead, naming the offending intents and the remedy. There is no
+// automatic repair: deciding which fill row is authoritative for an intent
+// is not the migration runner's call to make.
+//
+// Version 2 is this package's version number, but migrationPreconditions is
+// keyed on it alone, and the atomic-rollback/upgrade-only-pending tests drive
+// applyMigrations with synthetic, unrelated schemas that happen to reuse
+// version 2. Checking for the fills table first keeps this precondition a
+// no-op against any schema that isn't actually the one it guards, in tests
+// and in any future reuse of applyMigrations with a different migration set.
+func checkNoDuplicateFillsPerIntent(ctx context.Context, tx *sql.Tx) error {
+	var haveFillsTable int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'fills'`,
+	).Scan(&haveFillsTable); err != nil {
+		return fmt.Errorf("sqlite: check duplicate fills before migration 2: %w", err)
+	}
+	if haveFillsTable == 0 {
+		return nil
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT order_intent_id FROM fills
+		GROUP BY order_intent_id HAVING COUNT(*) > 1
+		ORDER BY order_intent_id`)
+	if err != nil {
+		return fmt.Errorf("sqlite: check duplicate fills before migration 2: %w", err)
+	}
+	defer rows.Close()
+
+	var dupes []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("sqlite: check duplicate fills before migration 2: %w", err)
+		}
+		dupes = append(dupes, id)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("sqlite: check duplicate fills before migration 2: %w", err)
+	}
+	if len(dupes) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"sqlite: cannot apply migration 2: order_intent_id(s) %s have more than one fill row, which the new UNIQUE(order_intent_id) index forbids; "+
+			"for a paper-mode database it is safe to delete the file and let it recreate itself on next start, otherwise remove the duplicate fill rows for these intents by hand before restarting",
+		strings.Join(dupes, ", "),
+	)
+}
+
 // migrate loads the embedded migrations and applies any that are pending to
 // db. now supplies the applied_at timestamp; the caller injects it (Open
 // passes time.Now().UTC) so no time source is read below the orchestration
@@ -100,12 +185,14 @@ func migrate(ctx context.Context, db *sql.DB, now func() time.Time) error {
 
 // applyMigrations applies the given migrations to db in version order, each
 // inside its own transaction, and verifies the checksum of every
-// already-applied migration against the copy in migs. It refuses to proceed if
-// the database has any applied version not present in migs — in particular a
-// version newer than the highest given migration, which means the database was
-// written by a newer build of the robot. Taking the migration set as a
-// parameter (rather than always loading the embedded one) lets the upgrade and
-// atomic-rollback tests drive it with synthetic migrations.
+// already-applied migration against the copy in migs (accepting
+// legacyV1Checksum as an equivalent variant of version 1). It refuses to
+// proceed if the database has any applied version not present in migs — in
+// particular a version newer than the highest given migration, which means
+// the database was written by a newer build of the robot. Taking the
+// migration set as a parameter (rather than always loading the embedded one)
+// lets the upgrade and atomic-rollback tests drive it with synthetic
+// migrations.
 func applyMigrations(ctx context.Context, db *sql.DB, migs []migration, now func() time.Time) error {
 	if _, err := db.ExecContext(ctx, createSchemaMigrationsTable); err != nil {
 		return fmt.Errorf("sqlite: create schema_migrations: %w", err)
@@ -125,6 +212,7 @@ func applyMigrations(ctx context.Context, db *sql.DB, migs []migration, now func
 		return err
 	}
 
+	legacyV1 := false
 	for v, sum := range applied {
 		if v > maxKnown {
 			return fmt.Errorf("sqlite: database has applied migration %d, newer than the highest migration (%d) this binary knows; refusing to open", v, maxKnown)
@@ -133,16 +221,25 @@ func applyMigrations(ctx context.Context, db *sql.DB, migs []migration, now func
 		if !ok {
 			return fmt.Errorf("sqlite: database has applied migration %d with no matching embedded migration file; refusing to open", v)
 		}
-		if m.checksum != sum {
-			return fmt.Errorf("sqlite: checksum mismatch for migration %d (%s): database recorded %s, binary has %s", v, m.name, sum, m.checksum)
+		if m.checksum == sum {
+			continue
 		}
+		if v == 1 && sum == legacyV1Checksum {
+			legacyV1 = true
+			continue
+		}
+		return fmt.Errorf("sqlite: checksum mismatch for migration %d (%s): database recorded %s, binary has %s", v, m.name, sum, m.checksum)
 	}
 
 	for _, m := range migs {
 		if _, ok := applied[m.version]; ok {
 			continue
 		}
-		if err := applyMigration(ctx, db, m, now); err != nil {
+		sqlText := m.sql
+		if m.version == 2 && legacyV1 {
+			sqlText = legacyV1UpgradeTo2SQL
+		}
+		if err := applyMigration(ctx, db, m, sqlText, now); err != nil {
 			return err
 		}
 	}
@@ -171,13 +268,17 @@ func appliedMigrations(ctx context.Context, db *sql.DB) (map[int]string, error) 
 	return applied, nil
 }
 
-// applyMigration runs one migration's SQL and records it in schema_migrations
-// inside a single transaction, so the DDL and its schema_migrations row commit
-// or roll back atomically: a migration whose SQL fails partway leaves neither
-// the partial schema change nor a version row behind. applied_at comes from the
-// injected now func (DESIGN §3's no-time.Now rule) and is stored in the same
-// fixed-width UTC form as every other timestamp column.
-func applyMigration(ctx context.Context, db *sql.DB, m migration, now func() time.Time) (err error) {
+// applyMigration runs sqlText — m's canonical SQL, or a legacy-compatibility
+// substitute the caller chose for m.version — and records m's canonical
+// checksum in schema_migrations, inside a single transaction, so the DDL and
+// its schema_migrations row commit or roll back atomically: a migration
+// whose SQL fails partway leaves neither the partial schema change nor a
+// version row behind. Any migrationPreconditions entry for m.version runs
+// first, inside the same transaction, and can abort before the DDL runs.
+// applied_at comes from the injected now func (DESIGN §3's no-time.Now rule)
+// and is stored in the same fixed-width UTC form as every other timestamp
+// column.
+func applyMigration(ctx context.Context, db *sql.DB, m migration, sqlText string, now func() time.Time) (err error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("sqlite: begin migration %d tx: %w", m.version, err)
@@ -188,7 +289,13 @@ func applyMigration(ctx context.Context, db *sql.DB, m migration, now func() tim
 		}
 	}()
 
-	if _, err = tx.ExecContext(ctx, m.sql); err != nil {
+	if check, ok := migrationPreconditions[m.version]; ok {
+		if err = check(ctx, tx); err != nil {
+			return err
+		}
+	}
+
+	if _, err = tx.ExecContext(ctx, sqlText); err != nil {
 		return fmt.Errorf("sqlite: apply migration %d (%s): %w", m.version, m.name, err)
 	}
 	if _, err = tx.ExecContext(ctx,
