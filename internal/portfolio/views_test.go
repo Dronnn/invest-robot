@@ -195,6 +195,56 @@ func TestDayPnL_FeesReportedSeparatelyNotAsUnrealized(t *testing.T) {
 	}
 }
 
+func TestDayPnL_ExcludesFillsAfterLatestSnapshot(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	uid := seedInstrument(t, db, "uid-1", 1).UID
+	seedIntent(t, db, uid, "buy-1")
+	seedIntent(t, db, uid, "sell-1")
+	p, sim := newTestPortfolio()
+	sessionStart := sim.Now()
+
+	if err := p.Init(ctx, db, mustDecimal(t, "10000")); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if err := p.EnsureSessionStartSnapshot(ctx, db, sessionStart); err != nil {
+		t.Fatalf("ensure session start snapshot: %v", err)
+	}
+
+	// Fills (with fees) happen after the only equity snapshot, and no new
+	// snapshot captures them. Their fees must not be counted, or DayPnL would
+	// report a phantom unrealized swing that Total does not reflect.
+	sim.Advance(time.Hour)
+	if err := applyFillViaExecution(t, ctx, p, db, FillApplication{
+		Fill:          model.Fill{IntentID: "buy-1", Price: mustDecimal(t, "100"), Qty: 10, Fee: mustDecimal(t, "5"), TS: sim.Now()},
+		InstrumentUID: uid, Side: model.SideBuy, Lot: 1,
+	}); err != nil {
+		t.Fatalf("buy: %v", err)
+	}
+	if err := applyFillViaExecution(t, ctx, p, db, FillApplication{
+		Fill:          model.Fill{IntentID: "sell-1", Price: mustDecimal(t, "100"), Qty: 10, Fee: mustDecimal(t, "5"), TS: sim.Now()},
+		InstrumentUID: uid, Side: model.SideSell, Lot: 1,
+	}); err != nil {
+		t.Fatalf("sell: %v", err)
+	}
+
+	result, err := p.DayPnL(ctx, db, sessionStart)
+	if err != nil {
+		t.Fatalf("day pnl: %v", err)
+	}
+	// Latest snapshot is still the session-start one, so Total is 0; the
+	// post-snapshot fills are excluded, keeping Fees/Unrealized consistent.
+	if result.Total.String() != "0" {
+		t.Errorf("total = %s, want 0 (no snapshot captured the fills yet)", result.Total)
+	}
+	if !result.Fees.IsZero() {
+		t.Errorf("fees = %s, want 0 (fills after the latest snapshot are excluded)", result.Fees)
+	}
+	if !result.Unrealized.IsZero() {
+		t.Errorf("unrealized = %s, want 0 (no phantom swing from unaccounted fees)", result.Unrealized)
+	}
+}
+
 func TestEnsureSessionStartSnapshot_IdempotentAndRollsForward(t *testing.T) {
 	db := openTest(t)
 	ctx := context.Background()

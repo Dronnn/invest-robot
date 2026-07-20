@@ -111,7 +111,13 @@ func (p *Portfolio) DayPnL(ctx context.Context, q sqlite.Querier, sessionStart t
 		return DayPnLResult{}, fmt.Errorf("portfolio: day pnl: total delta overflow: %w", err)
 	}
 
-	realized, fees, err := p.realizedAndFeesSince(ctx, q, sessionStart)
+	// Bound the realized/fee window to the latest snapshot's timestamp, the
+	// same instant Total is measured to. A fill recorded after the last equity
+	// snapshot is not yet reflected in Total, so counting its fee/realized here
+	// would make Total, Fees and Unrealized mutually inconsistent (a phantom
+	// unrealized swing equal to the unaccounted fee). It is picked up once a
+	// snapshot captures it.
+	realized, fees, err := p.realizedAndFeesBetween(ctx, q, sessionStart, latest.TS)
 	if err != nil {
 		return DayPnLResult{}, err
 	}
@@ -128,22 +134,24 @@ func (p *Portfolio) DayPnL(ctx context.Context, q sqlite.Querier, sessionStart t
 	return DayPnLResult{Realized: realized, Unrealized: unrealized, Fees: fees, Total: total}, nil
 }
 
-// realizedAndFeesSince sums, across every fill with ts >= sessionStart, both
-// fills.realized_pnl (gross price PnL; nil on a buy fill, contributing nothing)
-// and fills.fee (the commission on every fill, buy or sell). FillRepo exposes
-// no time-ranged read narrower than "every fill", so this walks the full table
-// via Recent(ctx, q, -1) — a negative limit is SQLite's documented "no upper
+// realizedAndFeesBetween sums, across every fill with sessionStart <= ts <=
+// until, both fills.realized_pnl (gross price PnL; nil on a buy fill,
+// contributing nothing) and fills.fee (the commission on every fill, buy or
+// sell). until is the latest equity-snapshot timestamp, so the window matches
+// the interval Total is measured over — a fill after the last snapshot is not
+// yet in Total and must not be in Realized/Fees either. FillRepo exposes no
+// time-ranged read narrower than "every fill", so this walks the full table via
+// Recent(ctx, q, -1) — a negative limit is SQLite's documented "no upper
 // bound" — and filters/sums in Go. Acceptable at this project's scale (a
 // personal trading robot's fills table is not going to reach a size where this
-// is a bottleneck); if it ever became one, FillRepo would need a
-// since-timestamp query.
-func (p *Portfolio) realizedAndFeesSince(ctx context.Context, q sqlite.Querier, sessionStart time.Time) (realized, fees model.Decimal, err error) {
+// is a bottleneck); if it ever became one, FillRepo would need a ranged query.
+func (p *Portfolio) realizedAndFeesBetween(ctx context.Context, q sqlite.Querier, sessionStart, until time.Time) (realized, fees model.Decimal, err error) {
 	fills, err := (sqlite.FillRepo{}).Recent(ctx, q, -1)
 	if err != nil {
 		return model.Decimal{}, model.Decimal{}, fmt.Errorf("portfolio: day pnl: recent fills: %w", err)
 	}
 	for _, f := range fills {
-		if f.TS.Before(sessionStart) {
+		if f.TS.Before(sessionStart) || f.TS.After(until) {
 			continue
 		}
 		if f.RealizedPnL != nil {
