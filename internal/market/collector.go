@@ -62,6 +62,11 @@ type Collector struct {
 	events      EventLog
 	clock       clock.Clock
 
+	// quoteListener, if set via RegisterQuoteListener before Start, is called
+	// with every quote after it is persisted — the seam the paper executor's
+	// OnQuote is wired to in app composition.
+	quoteListener func(model.Quote)
+
 	cfg      Config
 	interval model.CandleInterval
 
@@ -388,6 +393,7 @@ func (c *Collector) onLastPrice(ctx context.Context, e tinvestcli.LastPriceEvent
 		h.stale = false
 	}
 	c.mu.Unlock()
+	c.notifyQuote(q)
 }
 
 // onOrderbook ingests a top-of-book snapshot, updating only the bid/ask fields
@@ -413,6 +419,20 @@ func (c *Collector) onOrderbook(ctx context.Context, e tinvestcli.OrderbookEvent
 		h.stale = false
 	}
 	c.mu.Unlock()
+	c.notifyQuote(q)
+}
+
+// RegisterQuoteListener registers fn to be called with every quote after it is
+// persisted. Call it once before Start (the listener is read from the stream
+// goroutine); the paper executor's OnQuote is wired here in app composition so a
+// resting order fills on the next observation.
+func (c *Collector) RegisterQuoteListener(fn func(model.Quote)) { c.quoteListener = fn }
+
+// notifyQuote delivers a persisted quote to the registered listener, if any.
+func (c *Collector) notifyQuote(q model.Quote) {
+	if c.quoteListener != nil {
+		c.quoteListener(q)
+	}
 }
 
 // composeQuoteLast updates the instrument's last-known last price and returns a
