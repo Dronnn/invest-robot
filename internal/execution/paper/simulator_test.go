@@ -217,6 +217,105 @@ func TestOnQuote_OutsideSessionRests(t *testing.T) {
 	}
 }
 
+// TestOnQuote_SessionGatePersistsAcrossRestart proves the trading-session
+// window survives a restart: a fresh Simulator (no in-memory session) still
+// gates a resting order on the persisted window rather than defaulting to
+// 24-hour-open and filling an out-of-session observation.
+func TestOnQuote_SessionGatePersistsAcrossRestart(t *testing.T) {
+	db := openDB(t)
+	clk := clock.NewSimulated(base)
+	instr := seedInstrument(t, db, "uid-1", 1, "0.01")
+
+	sess := execution.Session{Start: base.Add(time.Hour), End: base.Add(2 * time.Hour)}
+	s1 := newSim(t, db, clk, &fakeApplier{}, 0, "0")
+	id := submit(t, s1, db, buyMarket("uid-1", 1), instr, quote("uid-1", "99.90", "100.00", "99.95", 0), sess)
+
+	// Restart: a fresh Simulator sharing the database, with no in-memory session.
+	s2 := newSim(t, db, clk, &fakeApplier{}, 0, "0")
+
+	// An observation after activation but before the session opens must rest.
+	if err := observe(t, s2, clk, quote("uid-1", "99.90", "100.00", "99.95", 30*time.Minute)); err != nil {
+		t.Fatalf("OnQuote pre-session: %v", err)
+	}
+	if got := stateOf(t, db, id); got != model.IntentAcked {
+		t.Fatalf("state after out-of-session quote on restart = %s, want acked (persisted session gates)", got)
+	}
+
+	// An observation inside the persisted session fills.
+	if err := observe(t, s2, clk, quote("uid-1", "99.90", "100.00", "99.95", 90*time.Minute)); err != nil {
+		t.Fatalf("OnQuote in-session: %v", err)
+	}
+	if got := stateOf(t, db, id); got != model.IntentFilled {
+		t.Fatalf("state after in-session quote = %s, want filled", got)
+	}
+}
+
+// TestOnQuote_TradingStatusGatesFills: a suspended (side-disabled) instrument
+// does not fill, while one whose side is available does.
+func TestOnQuote_TradingStatusGatesFills(t *testing.T) {
+	ctx := context.Background()
+
+	submitWithStatus := func(t *testing.T, s *Simulator, db *sqlite.DB, instr model.Instrument, status string, buyAvail bool) string {
+		t.Helper()
+		decID := seedDecision(t, db, instr.UID)
+		sc := execution.SubmitContext{
+			Instruments: map[model.InstrumentUID]execution.InstrumentContext{instr.UID: {
+				Instrument:    instr,
+				Quote:         quote(instr.UID, "99.90", "100.00", "99.95", 0),
+				TradingStatus: status,
+				BuyAvailable:  buyAvail,
+				SellAvailable: false,
+			}},
+			DecisionIDs: []int64{decID},
+			Session:     openSession,
+		}
+		before := map[string]struct{}{}
+		for _, r := range loadIntents(t, db) {
+			before[r.ID] = struct{}{}
+		}
+		if err := s.Submit(ctx, []model.Decision{buyMarket(instr.UID, 1)}, sc); err != nil {
+			t.Fatalf("submit: %v", err)
+		}
+		for _, r := range loadIntents(t, db) {
+			if _, seen := before[r.ID]; !seen {
+				return r.ID
+			}
+		}
+		t.Fatal("no intent created")
+		return ""
+	}
+
+	t.Run("suspended does not fill", func(t *testing.T) {
+		db := openDB(t)
+		clk := clock.NewSimulated(base)
+		s := newSim(t, db, clk, &fakeApplier{}, 0, "0")
+		instr := seedInstrument(t, db, "uid-1", 1, "0.01")
+		id := submitWithStatus(t, s, db, instr, "not_available_for_trading", false)
+
+		if err := observe(t, s, clk, quote("uid-1", "99.90", "100.00", "99.95", time.Second)); err != nil {
+			t.Fatalf("OnQuote: %v", err)
+		}
+		if got := stateOf(t, db, id); got != model.IntentAcked {
+			t.Fatalf("state = %s, want acked (a buy-disabled instrument must not fill)", got)
+		}
+	})
+
+	t.Run("buy-available fills", func(t *testing.T) {
+		db := openDB(t)
+		clk := clock.NewSimulated(base)
+		s := newSim(t, db, clk, &fakeApplier{}, 0, "0")
+		instr := seedInstrument(t, db, "uid-1", 1, "0.01")
+		id := submitWithStatus(t, s, db, instr, "normal_trading", true)
+
+		if err := observe(t, s, clk, quote("uid-1", "99.90", "100.00", "99.95", time.Second)); err != nil {
+			t.Fatalf("OnQuote: %v", err)
+		}
+		if got := stateOf(t, db, id); got != model.IntentFilled {
+			t.Fatalf("state = %s, want filled (buy is available)", got)
+		}
+	})
+}
+
 // TestSubmit_RejectsBadInstrumentData journals the intent, then rejects it when
 // the instrument's tick is unknown, recording the reason both as an event and
 // on the intent row itself (order_intents.reason).

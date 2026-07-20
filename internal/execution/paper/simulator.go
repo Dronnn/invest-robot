@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/Dronnn/invest-robot/internal/clock"
@@ -16,11 +15,11 @@ import (
 	"github.com/Dronnn/invest-robot/internal/store/sqlite"
 )
 
-// Simulator is the paper-trading Executor. It owns no market state: intents,
-// fills and events live in SQLite, so the only in-memory state is the latest
-// session window (recorded by Submit, read by OnQuote) guarded by a mutex, which
-// makes it safe to feed quotes on one goroutine while the cycle submits on
-// another.
+// Simulator is the paper-trading Executor. It owns no in-memory market state:
+// intents, fills, events, the trading-session window and per-instrument trading
+// status all live in SQLite, so it is safe to feed quotes on one goroutine
+// while the cycle submits on another (SQLite serializes the writes), and every
+// gate a fill depends on survives a restart.
 type Simulator struct {
 	db      *sqlite.DB
 	clock   clock.Clock
@@ -31,9 +30,6 @@ type Simulator struct {
 	commNum     int64 // commission rate as an exact ratio commNum/commDen …
 	commDen     int64 // … so a fee is notional*commNum/commDen with no float.
 	maxQuoteAge time.Duration
-
-	mu      sync.Mutex
-	session execution.Session
 }
 
 // New builds a paper Simulator. cfg supplies the slippage and commission rate;
@@ -72,13 +68,30 @@ func New(db *sqlite.DB, clk clock.Clock, applier execution.FillApplier, cfg conf
 // Submit journals an intent for each actionable decision and drives it to the
 // resting `acked` state. It never fills: a market order fills on the next
 // OnQuote, a limit order rests until a quote crosses it (DESIGN §7). The current
-// session is recorded for OnQuote and ExpireDay to gate on.
+// session window and each instrument's trading status are persisted first, so
+// OnQuote gates fills on them even after a restart, before another Submit runs.
 func (s *Simulator) Submit(ctx context.Context, ds []model.Decision, sc execution.SubmitContext) error {
 	if len(sc.DecisionIDs) != len(ds) {
 		return fmt.Errorf("paper: submit got %d decisions but %d decision ids", len(ds), len(sc.DecisionIDs))
 	}
-	s.setSession(sc.Session)
 	now := s.clock.Now()
+	if err := (sqlite.ExecSessionRepo{}).Upsert(ctx, s.db,
+		sqlite.ExecSession{Start: sc.Session.Start, End: sc.Session.End}, now); err != nil {
+		return err
+	}
+	for uid, ic := range sc.Instruments {
+		if ic.TradingStatus == "" {
+			continue // not provided: leave the instrument unrestricted
+		}
+		if err := (sqlite.TradingStatusRepo{}).Upsert(ctx, s.db, sqlite.TradingStatus{
+			InstrumentUID: uid,
+			Status:        ic.TradingStatus,
+			BuyAvailable:  ic.BuyAvailable,
+			SellAvailable: ic.SellAvailable,
+		}, now); err != nil {
+			return err
+		}
+	}
 	for i, d := range ds {
 		if err := s.submitOne(ctx, d, sc.DecisionIDs[i], sc, now); err != nil {
 			return err
@@ -229,13 +242,34 @@ func (s *Simulator) OnQuote(ctx context.Context, q model.Quote) error {
 	}
 
 	now := s.clock.Now()
-	sess := s.snapshotSession()
+	sess, err := s.currentSession(ctx)
+	if err != nil {
+		return err
+	}
+	status, hasStatus, err := (sqlite.TradingStatusRepo{}).Get(ctx, s.db, q.InstrumentUID)
+	if err != nil {
+		return err
+	}
 	for _, in := range resting {
-		if err := s.tryFill(ctx, in, q, instr, now, sess); err != nil {
+		if err := s.tryFill(ctx, in, q, instr, now, sess, status, hasStatus); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// currentSession reads the persisted trading-session window. A missing row is
+// the documented 24-hour-open default (a zero-value Session), so an OnQuote
+// before the first Submit — or against a fresh database — is unrestricted.
+func (s *Simulator) currentSession(ctx context.Context) (execution.Session, error) {
+	sess, found, err := (sqlite.ExecSessionRepo{}).Get(ctx, s.db)
+	if err != nil {
+		return execution.Session{}, err
+	}
+	if !found {
+		return execution.Session{}, nil
+	}
+	return execution.Session{Start: sess.Start, End: sess.End}, nil
 }
 
 // tryFill attempts to fill one resting intent against q, enforcing the
@@ -252,7 +286,11 @@ func (s *Simulator) OnQuote(ctx context.Context, q model.Quote) error {
 // nor a future quote may cancel an immediate-or-cancel order: those quotes are
 // simply not this order's next observation, so it keeps resting until a real
 // later one arrives (a delayed pre-decision quote must neither fill nor cancel).
-func (s *Simulator) tryFill(ctx context.Context, in model.OrderIntent, q model.Quote, instr model.Instrument, now time.Time, sess execution.Session) error {
+//
+// When a persisted trading status is present (hasStatus), the order's side must
+// be available on it: a suspended or side-disabled instrument does not fill. An
+// absent status leaves the instrument unrestricted.
+func (s *Simulator) tryFill(ctx context.Context, in model.OrderIntent, q model.Quote, instr model.Instrument, now time.Time, sess execution.Session, status sqlite.TradingStatus, hasStatus bool) error {
 	if q.TS.After(now) {
 		return nil // future-dated observation: ignore, keep resting
 	}
@@ -272,6 +310,9 @@ func (s *Simulator) tryFill(ctx context.Context, in model.OrderIntent, q model.Q
 	}
 	if !sess.IsOpen(q.TS) {
 		return rest("outside trading session")
+	}
+	if hasStatus && !sideAvailable(in.Side, status) {
+		return rest("instrument not available for " + in.Side.String() + " (status " + status.Status + ")")
 	}
 	if instr.MinPriceIncrement.Sign() <= 0 {
 		return rest("unknown price tick")
@@ -416,16 +457,16 @@ func (s *Simulator) restingIntents(ctx context.Context, uid model.InstrumentUID)
 	return out, nil
 }
 
-func (s *Simulator) setSession(sess execution.Session) {
-	s.mu.Lock()
-	s.session = sess
-	s.mu.Unlock()
-}
-
-func (s *Simulator) snapshotSession() execution.Session {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.session
+// sideAvailable reports whether an order side is permitted by a persisted
+// trading status: a buy needs BuyAvailable, a sell needs SellAvailable. A
+// suspended instrument has both false.
+func sideAvailable(side model.Side, status sqlite.TradingStatus) bool {
+	switch side {
+	case model.SideSell:
+		return status.SellAvailable
+	default:
+		return status.BuyAvailable
+	}
 }
 
 // sideForAction maps a decision action to an order side. Only buy and sell are

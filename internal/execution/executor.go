@@ -55,10 +55,21 @@ type SubmitContext struct {
 }
 
 // InstrumentContext pairs an instrument's trading parameters with its freshest
-// quote, as seen at Submit time.
+// quote and its authoritative trading permissions, as seen at Submit time.
 type InstrumentContext struct {
 	Instrument model.Instrument
 	Quote      model.Quote
+
+	// TradingStatus is the broker's trading-status token for the instrument
+	// (informational). When non-empty, Submit persists the permissions below so
+	// OnQuote can gate fills on them across a restart; an empty TradingStatus
+	// means "not provided" and leaves the instrument unrestricted.
+	TradingStatus string
+	// BuyAvailable and SellAvailable are the authoritative per-side permissions
+	// a fill is gated on when TradingStatus is set: a suspended or side-disabled
+	// instrument does not fill.
+	BuyAvailable  bool
+	SellAvailable bool
 }
 
 // Session is the current trading day's window in absolute time. The zero value
