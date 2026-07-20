@@ -19,12 +19,22 @@ func TestRun_MissingConfig(t *testing.T) {
 	}
 }
 
-func TestRun_ValidConfig(t *testing.T) {
+// TestRun_ValidConfigFailsClosedWithoutTinvest checks that a well-formed config
+// loads but the robot then fails closed (exit 1) when tinvest cannot be
+// resolved. A bogus [tinvest] path makes this deterministic regardless of
+// whether tinvest is installed.
+func TestRun_ValidConfigFailsClosedWithoutTinvest(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "robot.toml")
 	contents := `
+[tinvest]
+path = "` + filepath.Join(dir, "no-such-tinvest") + `"
+
 [universe]
-instruments = ["SBER"]
+instruments = ["SBER@TQBR"]
+
+[storage]
+db_path = "` + filepath.Join(dir, "robot.db") + `"
 
 [risk]
 max_position_notional = "50000"
@@ -37,8 +47,8 @@ cash_floor = "10000"
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatalf("write temp config: %v", err)
 	}
-	if code := run([]string{"--config", path}); code != 0 {
-		t.Errorf("run(--config valid) = %d, want 0", code)
+	if code := run([]string{"--config", path}); code != 1 {
+		t.Errorf("run(--config valid, no tinvest) = %d, want 1", code)
 	}
 }
 

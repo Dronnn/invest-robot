@@ -4,12 +4,17 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
+	"github.com/Dronnn/invest-robot/internal/app"
 	"github.com/Dronnn/invest-robot/internal/config"
+	"github.com/Dronnn/invest-robot/internal/tinvestcli"
 )
 
 // version is the robot build version. Overridden at release build time via
@@ -30,7 +35,7 @@ func run(args []string) int {
 	}
 
 	if *showVersion {
-		fmt.Println("robot", version)
+		printVersion(*configPath)
 		return 0
 	}
 
@@ -40,13 +45,37 @@ func run(args []string) int {
 		return 1
 	}
 
-	fmt.Printf("robot %s: mode=%s engine=%s universe=%d instruments headless=%v db=%s\n",
-		version, cfg.Mode, cfg.Engine.Active, len(cfg.Universe.Instruments), *headless, cfg.Storage.DBPath)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	// App wiring (storage, tinvestcli, collectors, decision cycle, TUI)
-	// lands in later steps; Phase 1 scaffold stops after a successful
-	// config load.
+	if err := app.New(cfg, *headless).Run(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "robot: %v\n", err)
+		return 1
+	}
 	return 0
+}
+
+// printVersion prints the robot version and, best-effort, the resolved tinvest
+// CLI handshake info (DESIGN §4: the version check is part of the contract).
+func printVersion(configPath string) {
+	fmt.Println("robot", version)
+	cfg, err := config.Load(configPath)
+	tinvestPath := ""
+	if err == nil {
+		tinvestPath = cfg.TInvest.Path
+	}
+	client, err := tinvestcli.Resolve(tinvestcli.Config{Path: tinvestPath, Env: os.Environ()})
+	if err != nil {
+		fmt.Printf("tinvest: not resolved (%v)\n", err)
+		return
+	}
+	info, err := client.Handshake(context.Background())
+	if err != nil {
+		fmt.Printf("tinvest: handshake failed (%v)\n", err)
+		return
+	}
+	fmt.Printf("tinvest: %s (contract %s, schema %s)\n  path: %s\n  sha256: %s\n",
+		info.Version, info.Contract, info.SchemaVersion, info.Path, info.SHA256)
 }
 
 func defaultConfigPath() string {
