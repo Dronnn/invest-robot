@@ -14,6 +14,16 @@ import (
 )
 
 func main() {
+	// Test hook: with FAKETINVEST_IGNORE_SIGTERM set, the process ignores
+	// SIGTERM so it only dies on the supervisor's SIGKILL after KillGrace. This
+	// exercises the robot's full teardown ladder (SIGTERM -> grace -> SIGKILL)
+	// deterministically, e.g. to prove Stream.Close waits for the child to be
+	// reaped. It is never set in production.
+	if os.Getenv("FAKETINVEST_IGNORE_SIGTERM") == "1" {
+		signal.Ignore(syscall.SIGTERM)
+		os.Exit(run(context.Background(), os.Args[1:], os.Getenv, os.Stdout, os.Stderr))
+	}
+
 	// A cancelled context (SIGINT/SIGTERM) drives the graceful stream shutdown
 	// path, mirroring the robot's cancel -> SIGTERM -> grace shutdown of its
 	// stream child.

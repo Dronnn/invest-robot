@@ -488,6 +488,193 @@ done:
 	}
 }
 
+// TestPumpNeverDropsNewestMarketState proves a new last price / order book is
+// enqueued even when the queue is full and holds nothing to coalesce for that
+// instrument — the latest market state must survive a subsequently quiet feed.
+func TestPumpNeverDropsNewestMarketState(t *testing.T) {
+	s := &Stream{
+		client: &Client{cfg: Config{StreamQueueSize: 2}.withDefaults()},
+		events: make(chan Event, 1),
+		done:   make(chan struct{}),
+		wake:   make(chan struct{}, 1),
+	}
+	// Fill the queue to capacity with status frames (which do drop at cap).
+	s.deliverStatus(StatusEvent{Kind: StatusConnected})
+	s.deliverStatus(StatusEvent{Kind: StatusResubscribed})
+
+	s.deliverLastPrice(LastPriceEvent{InstrumentUID: "u-price", Price: model.MustDecimal("42")})
+	s.deliverOrderbook(OrderbookEvent{InstrumentUID: "u-book", Bid: model.MustDecimal("1"), Ask: model.MustDecimal("2")})
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var haveP, haveB bool
+	for _, e := range s.queue {
+		if p, ok := e.(LastPriceEvent); ok && p.InstrumentUID == "u-price" {
+			haveP = true
+		}
+		if b, ok := e.(OrderbookEvent); ok && b.InstrumentUID == "u-book" {
+			haveB = true
+		}
+	}
+	if !haveP {
+		t.Fatal("newest last price was dropped when the queue was full")
+	}
+	if !haveB {
+		t.Fatal("newest order book was dropped when the queue was full")
+	}
+}
+
+// TestPumpCoalesceKeepsArrivalOrder proves coalescing does not deliver a newer
+// event ahead of an older one: a re-queued book takes the tail position, after
+// the price that arrived between the two books.
+func TestPumpCoalesceKeepsArrivalOrder(t *testing.T) {
+	s := &Stream{
+		client: &Client{cfg: Config{StreamQueueSize: 8}.withDefaults()},
+		events: make(chan Event, 1),
+		done:   make(chan struct{}),
+		wake:   make(chan struct{}, 1),
+	}
+	t1 := time.Date(2026, 7, 19, 10, 0, 1, 0, time.UTC)
+	t2 := time.Date(2026, 7, 19, 10, 0, 2, 0, time.UTC)
+	t3 := time.Date(2026, 7, 19, 10, 0, 3, 0, time.UTC)
+	s.deliverOrderbook(OrderbookEvent{InstrumentUID: "u1", Bid: model.MustDecimal("10"), Time: t1})
+	s.deliverLastPrice(LastPriceEvent{InstrumentUID: "u1", Price: model.MustDecimal("11"), Time: t2})
+	s.deliverOrderbook(OrderbookEvent{InstrumentUID: "u1", Bid: model.MustDecimal("12"), Time: t3})
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.queue) != 2 {
+		t.Fatalf("queue length = %d, want 2 (one coalesced book + one price)", len(s.queue))
+	}
+	lp, ok := s.queue[0].(LastPriceEvent)
+	if !ok || !lp.Time.Equal(t2) {
+		t.Fatalf("first queued = %+v, want the price at t2 (older event first)", s.queue[0])
+	}
+	ob, ok := s.queue[1].(OrderbookEvent)
+	if !ok || !ob.Time.Equal(t3) {
+		t.Fatalf("second queued = %+v, want the coalesced book at t3 (newest last)", s.queue[1])
+	}
+}
+
+// TestCloseWaitsForSupervisorTeardown proves Close does not return until the
+// child is reaped. The fake ignores SIGTERM, so it only dies on the supervisor's
+// SIGKILL after KillGrace; Close must block roughly that long.
+func TestCloseWaitsForSupervisorTeardown(t *testing.T) {
+	script := `[
+	  {"type":"connected","time":"2026-07-19T10:00:00Z","data":{"attempt":1,"subscriptions":1}},
+	  {"type":"candle","time":"2026-07-19T10:00:00Z","delay_ms":60000,"data":{
+	     "instrument_uid":"` + sberUID + `","interval":"SUBSCRIPTION_INTERVAL_FIVE_MINUTES",
+	     "open":{"value":"1"},"high":{"value":"1"},"low":{"value":"1"},"close":{"value":"1"},
+	     "volume":"1","candle_time":"2026-07-19T10:00:00Z"}}
+	]`
+	dir := writeScenario(t, map[string]string{
+		"scenario.toml": "account_id = \"test-teardown\"\n[stream]\nscript = \"stream.json\"\n",
+		"stream.json":   script,
+	})
+	const killGrace = 400 * time.Millisecond
+	c := newClient(t, dir, t.TempDir(), func(cfg *Config) {
+		cfg.StreamBaseBackoff = time.Millisecond
+		cfg.StreamMaxBackoff = 5 * time.Millisecond
+		cfg.KillGrace = killGrace
+		cfg.Env = append(cfg.Env, "FAKETINVEST_IGNORE_SIGTERM=1")
+	})
+	s, err := c.StreamMarketdata(context.Background(), StreamRequest{
+		Instruments: []string{sberUID}, Candles: true, CandleInterval: model.Interval5m,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-s.Events() // connected: the child is up
+
+	start := time.Now()
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	elapsed := time.Since(start)
+	if elapsed < killGrace-100*time.Millisecond {
+		t.Fatalf("Close returned in %v, before the SIGKILL teardown (KillGrace %v): supervisor teardown not awaited", elapsed, killGrace)
+	}
+}
+
+// TestStreamBrokerRejectedNoRestart proves a broker rejection (exit 5) ends the
+// stream terminally rather than respawning until the circuit breaker trips.
+func TestStreamBrokerRejectedNoRestart(t *testing.T) {
+	script := `[
+	  {"type":"connected","time":"2026-07-19T10:00:00Z","data":{"attempt":1,"subscriptions":1}},
+	  {"type":"error","time":"2026-07-19T10:00:01Z","error":{"code":"BROKER_REJECTED","message":"instrument not tradable","retryable":false}},
+	  {"exit":5}
+	]`
+	dir := writeScenario(t, map[string]string{
+		"scenario.toml": "account_id = \"test-rej\"\n[stream]\nscript = \"stream.json\"\n",
+		"stream.json":   script,
+	})
+	c := newClient(t, dir, t.TempDir(), func(cfg *Config) {
+		streamFast(cfg)
+		cfg.StreamMaxFastRestarts = 10 // prove we stop on classification, not the breaker
+	})
+	s, err := c.StreamMarketdata(context.Background(), StreamRequest{Instruments: []string{sberUID}, Candles: true, CandleInterval: model.Interval5m})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	got := readEvents(t, s, nil, 5*time.Second)
+	if n := countConnectedAttempt1(got); n != 1 {
+		t.Fatalf("broker rejection must not restart: saw %d connected@1 (%s)", n, kinds(got))
+	}
+	last := got[len(got)-1]
+	down, ok := last.(*StreamDownError)
+	if !ok {
+		t.Fatalf("last event = %T, want *StreamDownError (%s)", last, kinds(got))
+	}
+	if down.CircuitTripped {
+		t.Fatal("broker rejection is a classification, not a circuit trip")
+	}
+	var re *BrokerRejectedError
+	if !errors.As(down.Err, &re) {
+		t.Fatalf("terminal cause = %T, want *BrokerRejectedError", down.Err)
+	}
+}
+
+// TestStreamSnapshotBecomesOrderbook proves an authoritative "snapshot" frame is
+// parsed into an OrderbookEvent (top-of-book), not swallowed as lifecycle status.
+func TestStreamSnapshotBecomesOrderbook(t *testing.T) {
+	script := `[
+	  {"type":"connected","time":"2026-07-19T10:00:00Z","data":{"attempt":1,"subscriptions":1}},
+	  {"type":"snapshot","time":"2026-07-19T10:00:00Z","data":{
+	     "instrument_uid":"` + sberUID + `","depth":10,
+	     "bids":[{"price":{"value":"100.4"},"quantity":"5"}],
+	     "asks":[{"price":{"value":"100.6"},"quantity":"5"}],
+	     "last_price":{"value":"100.5"},"close_price":{"value":"99"},
+	     "orderbook_time":"2026-07-19T10:00:00Z"}}
+	]`
+	dir := writeScenario(t, map[string]string{
+		"scenario.toml": "account_id = \"test-snap\"\n[stream]\nscript = \"stream.json\"\n",
+		"stream.json":   script,
+	})
+	c := newClient(t, dir, t.TempDir(), streamFast)
+	s, err := c.StreamMarketdata(context.Background(), StreamRequest{Instruments: []string{sberUID}, OrderbookDepth: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	got := readEvents(t, s, func(e []Event) bool { return countOrderbooks(e) >= 1 }, 5*time.Second)
+	var ob *OrderbookEvent
+	for _, e := range got {
+		if o, ok := e.(OrderbookEvent); ok {
+			cp := o
+			ob = &cp
+			break
+		}
+	}
+	if ob == nil {
+		t.Fatalf("snapshot frame did not become an OrderbookEvent: %s", kinds(got))
+	}
+	eqDec(t, ob.Bid, "100.4")
+	eqDec(t, ob.Ask, "100.6")
+}
+
 func TestStreamCleanShutdownViaClose(t *testing.T) {
 	before := runtime.NumGoroutine()
 	c := newClient(t, shippedScenario(t, "happy"), t.TempDir(), streamFast)

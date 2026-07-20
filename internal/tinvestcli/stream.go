@@ -48,7 +48,8 @@ type Stream struct {
 	cancel    context.CancelFunc
 	done      chan struct{}
 	closeOnce sync.Once
-	wake      chan struct{} // buffered(1): signals the pump that the queue changed
+	wake      chan struct{}  // buffered(1): signals the pump that the queue changed
+	wg        sync.WaitGroup // pump + supervisor; done closes only after both exit
 
 	mu       sync.Mutex
 	queue    []Event // FIFO delivery queue drained by the pump
@@ -59,8 +60,9 @@ type Stream struct {
 // Events is the delivery channel. It is closed when the stream ends.
 func (s *Stream) Events() <-chan Event { return s.events }
 
-// Done is closed once the supervisor has fully exited (child reaped, channel
-// closed).
+// Done is closed once BOTH the pump and the supervisor have exited — that is,
+// after the channel is closed AND the child process has been reaped. Close
+// waits on it, so it never returns while the old CLI process is still alive.
 func (s *Stream) Done() <-chan struct{} { return s.done }
 
 // Close shuts the stream down and blocks until teardown completes. It is
@@ -88,8 +90,13 @@ func (c *Client) StreamMarketdata(ctx context.Context, req StreamRequest) (*Stre
 		done:   make(chan struct{}),
 		wake:   make(chan struct{}, 1),
 	}
-	go s.pump(sctx)
-	go s.supervise(sctx, c.streamArgv(req))
+	// done closes only after both goroutines return: the pump owns the events
+	// channel, the supervisor owns the child's SIGTERM/KillGrace teardown, and
+	// Close must not report completion until the child is actually reaped.
+	s.wg.Add(2)
+	go func() { defer s.wg.Done(); s.pump(sctx) }()
+	go func() { defer s.wg.Done(); s.supervise(sctx, c.streamArgv(req)) }()
+	go func() { s.wg.Wait(); close(s.done) }()
 	return s, nil
 }
 
@@ -320,26 +327,16 @@ func (s *Stream) dispatch(f wireStreamFrame, lastErr **BrokerError) error {
 			Time:          wp.Time.UTC(),
 		})
 
-	case "orderbook":
+	case "orderbook", "snapshot":
+		// "orderbook" is an incremental top-of-book; "snapshot" is the
+		// authoritative book emitted after each (re)connect (invest AGENTS.md
+		// §order-book streams). Both coalesce to the latest per instrument, so a
+		// snapshot naturally replaces any pending book for that instrument.
 		var wo wireStreamOrderbook
 		if err := json.Unmarshal(f.Data, &wo); err != nil {
-			return &ProtocolError{Reason: "malformed orderbook frame", Err: err}
+			return &ProtocolError{Reason: "malformed " + f.Type + " frame", Err: err}
 		}
-		ev := OrderbookEvent{
-			InstrumentUID: wo.InstrumentUID,
-			Ticker:        wo.Ticker,
-			ClassCode:     wo.ClassCode,
-			FIGI:          wo.FIGI,
-			Depth:         wo.Depth,
-			Time:          wo.Time.UTC(),
-		}
-		if len(wo.Bids) > 0 {
-			ev.Bid = wo.Bids[0].Price.Amount
-		}
-		if len(wo.Asks) > 0 {
-			ev.Ask = wo.Asks[0].Price.Amount
-		}
-		s.deliverOrderbook(ev)
+		s.deliverOrderbook(orderbookEvent(wo))
 
 	case "error":
 		be := f.Error.broker()
@@ -372,6 +369,40 @@ func (s *Stream) dispatch(f wireStreamFrame, lastErr **BrokerError) error {
 	return nil
 }
 
+// orderbookEvent builds an OrderbookEvent from a decoded order-book/snapshot
+// payload, taking the best bid/ask (first level of each side).
+func orderbookEvent(wo wireStreamOrderbook) OrderbookEvent {
+	ev := OrderbookEvent{
+		InstrumentUID: wo.InstrumentUID,
+		Ticker:        wo.Ticker,
+		ClassCode:     wo.ClassCode,
+		FIGI:          wo.FIGI,
+		Depth:         wo.Depth,
+		Time:          parseStreamTime(wo.Time),
+	}
+	if len(wo.Bids) > 0 {
+		ev.Bid = wo.Bids[0].Price.Amount
+	}
+	if len(wo.Asks) > 0 {
+		ev.Ask = wo.Asks[0].Price.Amount
+	}
+	return ev
+}
+
+// parseStreamTime parses an RFC3339 stream timestamp, returning the zero time
+// for an empty or unparseable value rather than failing the whole frame (a
+// snapshot's orderbook_time can be empty).
+func parseStreamTime(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t.UTC()
+}
+
 // exitTerminal maps a process exit code to a non-restartable cause, or nil when
 // the exit is restartable. lastErr (the last error frame seen) refines exit 2.
 func exitTerminal(exit int, lastErr *BrokerError) error {
@@ -387,6 +418,11 @@ func exitTerminal(exit int, lastErr *BrokerError) error {
 			return &PolicyError{BrokerError: be}
 		}
 		return &UsageError{BrokerError: be}
+	case exitRejected:
+		// A broker rejection (e.g. an invalid instrument in the subscription) is
+		// final: restarting would just be rejected again. Stop, don't restart-loop
+		// until the circuit breaker trips.
+		return &BrokerRejectedError{BrokerError: be}
 	default:
 		return nil
 	}
@@ -402,6 +438,8 @@ func errForCode(be BrokerError) error {
 		return &UsageError{BrokerError: be}
 	case "POLICY":
 		return &PolicyError{BrokerError: be}
+	case "BROKER_REJECTED":
+		return &BrokerRejectedError{BrokerError: be}
 	default:
 		return nil
 	}
@@ -413,9 +451,9 @@ func errForCode(be BrokerError) error {
 // queued events in order, blocking on a slow consumer so nothing is stranded
 // when the feed goes quiet, and drains the whole queue before the terminal
 // StreamDownError. A shutdown (ctx cancel) abandons any still-undelivered
-// events — the consumer asked to stop.
+// events — the consumer asked to stop. It does not close done; that happens
+// once the supervisor has also exited (see StreamMarketdata).
 func (s *Stream) pump(ctx context.Context) {
-	defer close(s.done)
 	defer close(s.events)
 	for {
 		s.mu.Lock()
@@ -494,22 +532,24 @@ func (s *Stream) deliverCandle(ev CandleEvent) {
 
 func (s *Stream) deliverLastPrice(ev LastPriceEvent) {
 	s.mu.Lock()
-	// Last prices are replaceable: coalesce to the latest per instrument by
-	// replacing any still-queued price for the same instrument in place.
-	if !s.replaceLastPriceLocked(ev) && len(s.queue) < s.client.cfg.StreamQueueSize {
-		s.queue = append(s.queue, ev)
-	}
+	// Coalesce to the latest per instrument: drop any still-queued price for this
+	// instrument and enqueue the newest at the tail. Appending at the tail (not
+	// replacing in place) keeps FIFO-by-arrival order, so a coalesced event is
+	// never delivered ahead of a newer event that arrived after the one it
+	// replaces. The newest market state is never dropped — at most one price per
+	// instrument is queued, so the universe bounds the growth.
+	s.dropQueuedLastPriceLocked(ev.InstrumentUID)
+	s.queue = append(s.queue, ev)
 	s.mu.Unlock()
 	s.signal()
 }
 
 func (s *Stream) deliverOrderbook(ev OrderbookEvent) {
 	s.mu.Lock()
-	// Order books are replaceable: coalesce to the latest per instrument by
-	// replacing any still-queued book for the same instrument in place.
-	if !s.replaceOrderbookLocked(ev) && len(s.queue) < s.client.cfg.StreamQueueSize {
-		s.queue = append(s.queue, ev)
-	}
+	// Coalesce to the latest per instrument, at the tail (see deliverLastPrice):
+	// order books are the latest market state and are never dropped or reordered.
+	s.dropQueuedOrderbookLocked(ev.InstrumentUID)
+	s.queue = append(s.queue, ev)
 	s.mu.Unlock()
 	s.signal()
 }
@@ -530,28 +570,26 @@ func (s *Stream) deliverGap(ev GapEvent) {
 	s.signal()
 }
 
-// replaceLastPriceLocked replaces a still-queued last price for ev's instrument
-// with ev, returning true when it coalesced.
-func (s *Stream) replaceLastPriceLocked(ev LastPriceEvent) bool {
-	for i := len(s.queue) - 1; i >= 0; i-- {
-		if p, ok := s.queue[i].(LastPriceEvent); ok && p.InstrumentUID == ev.InstrumentUID {
-			s.queue[i] = ev
-			return true
+// dropQueuedLastPriceLocked removes any still-queued last price for uid, so the
+// caller can append the newest without leaving a stale one behind.
+func (s *Stream) dropQueuedLastPriceLocked(uid string) {
+	for i := 0; i < len(s.queue); i++ {
+		if p, ok := s.queue[i].(LastPriceEvent); ok && p.InstrumentUID == uid {
+			s.queue = append(s.queue[:i], s.queue[i+1:]...)
+			return
 		}
 	}
-	return false
 }
 
-// replaceOrderbookLocked replaces a still-queued order book for ev's instrument
-// with ev, returning true when it coalesced.
-func (s *Stream) replaceOrderbookLocked(ev OrderbookEvent) bool {
-	for i := len(s.queue) - 1; i >= 0; i-- {
-		if o, ok := s.queue[i].(OrderbookEvent); ok && o.InstrumentUID == ev.InstrumentUID {
-			s.queue[i] = ev
-			return true
+// dropQueuedOrderbookLocked removes any still-queued order book for uid, so the
+// caller can append the newest without leaving a stale one behind.
+func (s *Stream) dropQueuedOrderbookLocked(uid string) {
+	for i := 0; i < len(s.queue); i++ {
+		if o, ok := s.queue[i].(OrderbookEvent); ok && o.InstrumentUID == uid {
+			s.queue = append(s.queue[:i], s.queue[i+1:]...)
+			return
 		}
 	}
-	return false
 }
 
 // mergeGapLocked coalesces ev into a still-queued gap for the same instrument

@@ -233,9 +233,12 @@ type wireStreamLastPrice struct {
 	Time          time.Time `json:"time"`
 }
 
-// wireStreamOrderbook mirrors the streamed order-book data payload
-// (render.StreamOrderBookView). Only top-of-book is read; the deeper levels,
-// consistency flag, and limits are ignored.
+// wireStreamOrderbook mirrors both order-book data payloads: the incremental
+// "orderbook" frame (render.StreamOrderBookView) and the authoritative
+// "snapshot" frame emitted after each (re)connect (render.OrderBookView). Only
+// top-of-book is read; deeper levels, the consistency flag, and limits are
+// ignored. orderbook_time is a string (the renderer's Timestamp, which may be
+// empty) and is parsed leniently rather than decoded straight into time.Time.
 type wireStreamOrderbook struct {
 	InstrumentUID string                     `json:"instrument_uid"`
 	Ticker        string                     `json:"ticker"`
@@ -244,7 +247,7 @@ type wireStreamOrderbook struct {
 	Depth         int                        `json:"depth"`
 	Bids          []wireStreamOrderbookLevel `json:"bids"`
 	Asks          []wireStreamOrderbookLevel `json:"asks"`
-	Time          time.Time                  `json:"orderbook_time"`
+	Time          string                     `json:"orderbook_time"`
 }
 
 // wireStreamOrderbookLevel is one price/quantity level of a book side. Price is
