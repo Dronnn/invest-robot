@@ -89,10 +89,18 @@ func (f *fakeApplier) recorded() []execution.FillApplication {
 }
 
 // newSim builds a Simulator with the given slippage/commission and a one-minute
-// freshness window, on a clock fixed at base.
+// freshness window, on a clock fixed at base. The operational-halt cash floor is
+// disabled (use newSimWithFloor to exercise it).
 func newSim(t *testing.T, db *sqlite.DB, clk clock.Clock, applier execution.FillApplier, slippageBps int, commission string) *Simulator {
 	t.Helper()
-	s, err := New(db, clk, applier, config.PaperConfig{StartingCash: "100000", SlippageBps: slippageBps, CommissionRate: commission}, time.Minute)
+	return newSimWithFloor(t, db, clk, applier, slippageBps, commission, model.Decimal{})
+}
+
+// newSimWithFloor is newSim with a configured operational-halt cash floor, so a
+// fill that settles cash below it latches the halt.
+func newSimWithFloor(t *testing.T, db *sqlite.DB, clk clock.Clock, applier execution.FillApplier, slippageBps int, commission string, cashFloor model.Decimal) *Simulator {
+	t.Helper()
+	s, err := New(db, clk, applier, config.PaperConfig{StartingCash: "100000", SlippageBps: slippageBps, CommissionRate: commission}, time.Minute, cashFloor, "rub")
 	if err != nil {
 		t.Fatalf("New simulator: %v", err)
 	}

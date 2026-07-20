@@ -217,6 +217,68 @@ func TestOnQuote_OutsideSessionRests(t *testing.T) {
 	}
 }
 
+// cashDebitApplier is a test FillApplier that debits the fill's notional from
+// the cash ledger, so the simulator's post-fill floor check sees a real balance
+// move (the plain fakeApplier records but writes no cash).
+type cashDebitApplier struct{ currency string }
+
+func (a cashDebitApplier) ApplyFill(ctx context.Context, q sqlite.Querier, fa execution.FillApplication) error {
+	notional, err := fa.Fill.Price.MulInt(fa.Fill.Qty * fa.Lot)
+	if err != nil {
+		return err
+	}
+	_, err = (sqlite.CashRepo{}).Insert(ctx, q, sqlite.CashEntry{
+		TS: fa.Fill.TS, Delta: notional.Neg(), Currency: a.currency, Reason: "fill", Ref: fa.Fill.IntentID,
+	})
+	return err
+}
+
+// TestSettle_HaltOnCashBelowFloor: a fill that settles cash below the configured
+// floor latches the operational halt (the fill still stands); a fill that stays
+// above it does not.
+func TestSettle_HaltOnCashBelowFloor(t *testing.T) {
+	run := func(t *testing.T, startingCash, floor string) sqlite.Halt {
+		ctx := context.Background()
+		db := openDB(t)
+		clk := clock.NewSimulated(base)
+		instr := seedInstrument(t, db, "uid-1", 1, "0.01")
+		if _, err := (sqlite.CashRepo{}).Insert(ctx, db, sqlite.CashEntry{
+			TS: base, Delta: model.MustDecimal(startingCash), Currency: "rub", Reason: "deposit",
+		}); err != nil {
+			t.Fatalf("seed cash: %v", err)
+		}
+		s := newSimWithFloor(t, db, clk, cashDebitApplier{currency: "rub"}, 0, "0", model.MustDecimal(floor))
+
+		q0 := quote("uid-1", "199.90", "200.00", "199.95", 0)
+		id := submit(t, s, db, buyMarket("uid-1", 1), instr, q0, openSession) // fills at 200, notional 200
+		if err := observe(t, s, clk, quote("uid-1", "199.90", "200.00", "199.95", time.Second)); err != nil {
+			t.Fatalf("OnQuote: %v", err)
+		}
+		if got := stateOf(t, db, id); got != model.IntentFilled {
+			t.Fatalf("state = %s, want filled (the fill always stands)", got)
+		}
+		h, err := (sqlite.HaltRepo{}).Status(ctx, db)
+		if err != nil {
+			t.Fatalf("halt status: %v", err)
+		}
+		return h
+	}
+
+	t.Run("breaching the floor latches the halt", func(t *testing.T) {
+		// 600 cash, fill 200 -> 400 < 500 floor.
+		if h := run(t, "600", "500"); !h.Engaged {
+			t.Fatal("halt not engaged after a fill settled below the floor")
+		}
+	})
+
+	t.Run("staying above the floor leaves the robot running", func(t *testing.T) {
+		// 600 cash, fill 200 -> 400 > 100 floor.
+		if h := run(t, "600", "100"); h.Engaged {
+			t.Fatalf("halt engaged though cash stayed above the floor: %+v", h)
+		}
+	})
+}
+
 // TestOnQuote_SessionGatePersistsAcrossRestart proves the trading-session
 // window survives a restart: a fresh Simulator (no in-memory session) still
 // gates a resting order on the persisted window rather than defaulting to

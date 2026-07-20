@@ -30,13 +30,19 @@ type Simulator struct {
 	commNum     int64 // commission rate as an exact ratio commNum/commDen …
 	commDen     int64 // … so a fee is notional*commNum/commDen with no float.
 	maxQuoteAge time.Duration
+
+	cashFloor model.Decimal // operational-halt floor; a fill settling cash below it latches the halt (zero disables)
+	currency  string        // account settlement currency, used to read the cash balance for the floor check
 }
 
 // New builds a paper Simulator. cfg supplies the slippage and commission rate;
 // maxQuoteAge is how old a quote may be and still fill an order (a
 // non-positive value disables the freshness gate). applier is the portfolio
-// hook invoked inside each fill's transaction.
-func New(db *sqlite.DB, clk clock.Clock, applier execution.FillApplier, cfg config.PaperConfig, maxQuoteAge time.Duration) (*Simulator, error) {
+// hook invoked inside each fill's transaction. cashFloor and currency configure
+// the post-fill operational-halt check: a fill that settles the account's cash
+// (in currency) below cashFloor latches the durable halt so risk blocks new
+// buys; a non-positive cashFloor disables the check.
+func New(db *sqlite.DB, clk clock.Clock, applier execution.FillApplier, cfg config.PaperConfig, maxQuoteAge time.Duration, cashFloor model.Decimal, currency string) (*Simulator, error) {
 	if db == nil {
 		return nil, fmt.Errorf("paper: nil db")
 	}
@@ -62,6 +68,8 @@ func New(db *sqlite.DB, clk clock.Clock, applier execution.FillApplier, cfg conf
 		commNum:     num,
 		commDen:     den,
 		maxQuoteAge: maxQuoteAge,
+		cashFloor:   cashFloor,
+		currency:    currency,
 	}, nil
 }
 
@@ -388,8 +396,37 @@ func (s *Simulator) settle(ctx context.Context, in model.OrderIntent, price mode
 		if err := (sqlite.FillRepo{}).Insert(ctx, tx, fill, lowFidelity); err != nil {
 			return err
 		}
-		return s.applier.ApplyFill(ctx, tx, fa)
+		if err := s.applier.ApplyFill(ctx, tx, fa); err != nil {
+			return err
+		}
+		return s.enforceCashFloor(ctx, tx, now)
 	})
+}
+
+// enforceCashFloor latches the operational halt when the account's cash has
+// settled below the configured floor after a fill. A real fill can never be
+// refused once it has occurred, so the fill stands; instead the durable halt is
+// engaged in the same transaction, and risk then blocks all new buys until an
+// operator clears it. A non-positive cashFloor disables the check.
+func (s *Simulator) enforceCashFloor(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	if s.cashFloor.Sign() <= 0 {
+		return nil
+	}
+	bal, err := (sqlite.CashRepo{}).Balance(ctx, tx, s.currency)
+	if err != nil {
+		return err
+	}
+	if bal.Cmp(s.cashFloor) >= 0 {
+		return nil
+	}
+	if err := (sqlite.HaltRepo{}).Engage(ctx, tx, "cash settled below the configured floor after a fill", now); err != nil {
+		return err
+	}
+	return s.event(ctx, tx, "operational_halt", map[string]string{
+		"reason": "cash settled below the configured floor after a fill",
+		"floor":  s.cashFloor.String(),
+		"cash":   bal.String(),
+	}, now)
 }
 
 // rejectTx moves a journaled intent to the terminal rejected state within the
