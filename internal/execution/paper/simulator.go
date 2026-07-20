@@ -274,6 +274,7 @@ func (s *Simulator) settle(ctx context.Context, in model.OrderIntent, price mode
 		InstrumentUID: in.InstrumentUID,
 		Side:          in.Side,
 		Lot:           instr.Lot,
+		Currency:      instr.Currency,
 		LowFidelity:   lowFidelity,
 	}
 	return sqlite.WithTx(ctx, s.db, func(ctx context.Context, tx *sql.Tx) error {

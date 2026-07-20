@@ -89,12 +89,18 @@ type FillApplier interface {
 
 // FillApplication is the payload handed to FillApplier.ApplyFill. It carries the
 // fill plus the facts portfolio needs to value it: which instrument and side,
-// the lot size that converts lots to shares, and whether the price came from the
-// last-price fallback (LowFidelity) rather than a real bid/ask.
+// the lot size that converts lots to shares, the instrument's settlement
+// currency, and whether the price came from the last-price fallback
+// (LowFidelity) rather than a real bid/ask.
 type FillApplication struct {
 	Fill          model.Fill
 	InstrumentUID model.InstrumentUID
 	Side          model.Side
 	Lot           int64
-	LowFidelity   bool
+	// Currency is the instrument's settlement currency, carried so the
+	// portfolio can reject a fill that would post into a different currency
+	// than the account settles in rather than silently booking, say, a USD
+	// notional as RUB.
+	Currency    string
+	LowFidelity bool
 }
