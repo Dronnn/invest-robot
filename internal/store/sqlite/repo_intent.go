@@ -139,6 +139,27 @@ func (IntentRepo) Get(ctx context.Context, q Querier, clientOrderID string) (mod
 	return in, nil
 }
 
+// FindByDecision returns the intent journaled for decisionID, if any. Paper
+// submission is idempotent per decision — at most one intent exists for a given
+// decision_id — so this is how a retried Submit detects that a decision has
+// already been journaled and avoids minting a duplicate order. found is false
+// (with a nil error) when no intent references decisionID yet.
+func (IntentRepo) FindByDecision(ctx context.Context, q Querier, decisionID int64) (model.OrderIntent, bool, error) {
+	row := q.QueryRowContext(ctx, `
+		SELECT client_order_id, decision_id, instrument_uid, side, qty, type, limit_price, time_in_force, state, reason, created_at, updated_at
+		FROM order_intents WHERE decision_id = ?
+		ORDER BY created_at ASC, client_order_id ASC
+		LIMIT 1`, decisionID)
+	in, err := scanIntent(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.OrderIntent{}, false, nil
+	}
+	if err != nil {
+		return model.OrderIntent{}, false, fmt.Errorf("sqlite: find intent by decision %d: %w", decisionID, err)
+	}
+	return in, true, nil
+}
+
 // NonTerminal returns every intent not in a terminal state (filled, canceled,
 // rejected), oldest first — the set the robot reconciles on startup
 // (DESIGN §4).

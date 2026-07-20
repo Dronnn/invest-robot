@@ -112,37 +112,100 @@ func (s *Simulator) submitOne(ctx context.Context, d model.Decision, decisionID 
 			map[string]string{"instrument_uid": string(d.InstrumentUID), "reason": "decision quantity not positive; skipped"}, now)
 	}
 
-	// Journal before anything else (DESIGN §4): the durable `new` row exists
-	// before any state change, so a crash mid-flight leaves a reconcilable
-	// trace.
-	in, err := s.journal.Open(ctx, s.db, execution.NewIntent{
-		DecisionID:    decisionID,
-		InstrumentUID: d.InstrumentUID,
-		Side:          side,
-		Qty:           d.Quantity,
-		Type:          d.OrderType,
-		LimitPrice:    d.LimitPrice,
-		TimeInForce:   d.TimeInForce,
+	// Journal and drive the intent all the way to acked (or rejected) in one
+	// transaction (DESIGN §4). A crash mid-flight rolls the whole thing back, so
+	// an intent is never left stranded in new/submitted — a state quote
+	// processing never loads and so would leave the order stuck forever.
+	return sqlite.WithTx(ctx, s.db, func(ctx context.Context, tx *sql.Tx) error {
+		// Idempotency: a prior (possibly interrupted) Submit may already have
+		// journaled this decision. Retrying the batch must reuse that intent,
+		// not mint a second order under a new client order id.
+		if _, exists, err := (sqlite.IntentRepo{}).FindByDecision(ctx, tx, decisionID); err != nil {
+			return err
+		} else if exists {
+			return nil
+		}
+
+		in, err := s.journal.Open(ctx, tx, execution.NewIntent{
+			DecisionID:    decisionID,
+			InstrumentUID: d.InstrumentUID,
+			Side:          side,
+			Qty:           d.Quantity,
+			Type:          d.OrderType,
+			LimitPrice:    d.LimitPrice,
+			TimeInForce:   d.TimeInForce,
+		})
+		if err != nil {
+			return err
+		}
+
+		// Validate the instrument data now that the intent is journaled. Bad
+		// data is a rejection recorded on the intent (new->rejected), committed
+		// in this same transaction, not a batch error.
+		if ic.Instrument.MinPriceIncrement.Sign() <= 0 {
+			return s.rejectTx(ctx, tx, in.ClientOrderID, model.IntentNew, "unknown or invalid price tick", now)
+		}
+		if d.OrderType == model.OrderLimit && (d.LimitPrice == nil || d.LimitPrice.Sign() <= 0) {
+			return s.rejectTx(ctx, tx, in.ClientOrderID, model.IntentNew, "limit order without a valid limit price", now)
+		}
+
+		// new -> submitted -> acked via CAS. The order now rests; it can only
+		// fill on a later OnQuote.
+		if err := s.journal.Transition(ctx, tx, in.ClientOrderID, model.IntentNew, model.IntentSubmitted); err != nil {
+			return err
+		}
+		return s.journal.Transition(ctx, tx, in.ClientOrderID, model.IntentSubmitted, model.IntentAcked)
 	})
+}
+
+// Recover brings the durable intent journal back to a consistent state after a
+// restart. Paper submission drives new->submitted->acked in a single
+// transaction, so any intent still in new or submitted is a remnant of an
+// interrupted (or pre-atomic) submission that never became a resting order —
+// and OnQuote only ever fills acked intents, so it would otherwise sit forever.
+// Recover moves each to a terminal, reconcilable state: a never-submitted new
+// intent to rejected, a submitted-but-unacked intent to canceled. acked intents
+// are left untouched — they are legitimately resting and fill on the next
+// observation. Recover is idempotent and safe to call on every startup; a
+// concurrent transition (StateConflictError) is skipped, not treated as an
+// error. Call it once before the first OnQuote.
+func (s *Simulator) Recover(ctx context.Context) error {
+	nonTerminal, err := (sqlite.IntentRepo{}).NonTerminal(ctx, s.db)
 	if err != nil {
 		return err
 	}
-
-	// Now that the intent is journaled, validate the instrument data. Bad data
-	// is a rejection recorded on the intent (new->rejected), not a batch error.
-	if ic.Instrument.MinPriceIncrement.Sign() <= 0 {
-		return s.reject(ctx, in.ClientOrderID, model.IntentNew, "unknown or invalid price tick", now)
+	now := s.clock.Now()
+	for _, in := range nonTerminal {
+		var to model.IntentState
+		switch in.State {
+		case model.IntentNew:
+			to = model.IntentRejected
+		case model.IntentSubmitted:
+			to = model.IntentCanceled
+		default:
+			continue // acked (resting) or unknown: leave for normal processing
+		}
+		from := in.State
+		err := sqlite.WithTx(ctx, s.db, func(ctx context.Context, tx *sql.Tx) error {
+			if err := s.journal.TransitionWithReason(ctx, tx, in.ClientOrderID, from, to, "recovered: incomplete submission resolved on startup"); err != nil {
+				return err
+			}
+			return s.event(ctx, tx, "order_recovered", map[string]string{
+				"client_order_id": in.ClientOrderID,
+				"from":            from.String(),
+				"to":              to.String(),
+				"reason":          "incomplete submission resolved on startup",
+			}, now)
+		})
+		var conflict sqlite.StateConflictError
+		if errors.As(err, &conflict) {
+			continue // moved under us between the read and the CAS
+		}
+		if err != nil {
+			return err
+		}
 	}
-	if d.OrderType == model.OrderLimit && (d.LimitPrice == nil || d.LimitPrice.Sign() <= 0) {
-		return s.reject(ctx, in.ClientOrderID, model.IntentNew, "limit order without a valid limit price", now)
-	}
-
-	// Journal-before-submit ordering: new -> submitted -> acked, all via CAS.
-	// The order now rests; it can only fill on a later OnQuote.
-	if err := s.journal.Transition(ctx, s.db, in.ClientOrderID, model.IntentNew, model.IntentSubmitted); err != nil {
-		return err
-	}
-	return s.journal.Transition(ctx, s.db, in.ClientOrderID, model.IntentSubmitted, model.IntentAcked)
+	return nil
 }
 
 // OnQuote offers q to every order resting on q's instrument. Each fillable order
@@ -288,19 +351,19 @@ func (s *Simulator) settle(ctx context.Context, in model.OrderIntent, price mode
 	})
 }
 
-// reject moves a journaled intent to the terminal rejected state, recording
-// the human-readable reason both on the intent row (order_intents.reason)
-// and as an event (DESIGN §12's durable log). Both writes commit together.
-func (s *Simulator) reject(ctx context.Context, clientOrderID string, from model.IntentState, reason string, now time.Time) error {
-	return sqlite.WithTx(ctx, s.db, func(ctx context.Context, tx *sql.Tx) error {
-		if err := s.journal.TransitionWithReason(ctx, tx, clientOrderID, from, model.IntentRejected, reason); err != nil {
-			return err
-		}
-		return s.event(ctx, tx, "order_rejected", map[string]string{
-			"client_order_id": clientOrderID,
-			"reason":          reason,
-		}, now)
-	})
+// rejectTx moves a journaled intent to the terminal rejected state within the
+// caller's transaction, recording the human-readable reason both on the intent
+// row (order_intents.reason) and as an event (DESIGN §12's durable log). It
+// takes the transaction rather than opening its own so a submission's journal,
+// validation and rejection all commit or roll back together.
+func (s *Simulator) rejectTx(ctx context.Context, tx sqlite.Querier, clientOrderID string, from model.IntentState, reason string, now time.Time) error {
+	if err := s.journal.TransitionWithReason(ctx, tx, clientOrderID, from, model.IntentRejected, reason); err != nil {
+		return err
+	}
+	return s.event(ctx, tx, "order_rejected", map[string]string{
+		"client_order_id": clientOrderID,
+		"reason":          reason,
+	}, now)
 }
 
 // cancel moves a resting intent to canceled and records why, persisting the

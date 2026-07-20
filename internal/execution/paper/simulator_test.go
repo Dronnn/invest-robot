@@ -261,6 +261,112 @@ func TestSubmit_UUIDUniqueAcrossDecisions(t *testing.T) {
 	}
 }
 
+// insertIntentInState journals an intent for a fresh decision and advances it
+// to target via the store's CAS, so a recovery test can stage a stuck intent.
+func insertIntentInState(t *testing.T, db *sqlite.DB, uid model.InstrumentUID, target model.IntentState) string {
+	t.Helper()
+	ctx := context.Background()
+	decID := seedDecision(t, db, uid)
+	id, err := execution.NewClientOrderID()
+	if err != nil {
+		t.Fatalf("client order id: %v", err)
+	}
+	if err := (sqlite.IntentRepo{}).Insert(ctx, db, model.OrderIntent{
+		ClientOrderID: id, DecisionID: decID, InstrumentUID: uid,
+		Side: model.SideBuy, Qty: 1, Type: model.OrderMarket, TimeInForce: model.TIFDay,
+		State: model.IntentNew, CreatedAt: base, UpdatedAt: base,
+	}); err != nil {
+		t.Fatalf("insert intent: %v", err)
+	}
+	if target == model.IntentNew {
+		return id
+	}
+	if err := (sqlite.IntentRepo{}).UpdateState(ctx, db, id, model.IntentNew, model.IntentSubmitted, base); err != nil {
+		t.Fatalf("advance to submitted: %v", err)
+	}
+	if target == model.IntentSubmitted {
+		return id
+	}
+	if err := (sqlite.IntentRepo{}).UpdateState(ctx, db, id, model.IntentSubmitted, model.IntentAcked, base); err != nil {
+		t.Fatalf("advance to acked: %v", err)
+	}
+	return id
+}
+
+// TestSubmit_IdempotentByDecision: resubmitting the same decision reuses the
+// existing intent rather than minting a second order under a new id.
+func TestSubmit_IdempotentByDecision(t *testing.T) {
+	db := openDB(t)
+	clk := clock.NewSimulated(base)
+	s := newSim(t, db, clk, &fakeApplier{}, 0, "0")
+	instr := seedInstrument(t, db, "uid-1", 1, "0.01")
+	decID := seedDecision(t, db, instr.UID)
+
+	sc := execution.SubmitContext{
+		Instruments: map[model.InstrumentUID]execution.InstrumentContext{instr.UID: {Instrument: instr, Quote: quote(instr.UID, "10", "10.01", "10", 0)}},
+		DecisionIDs: []int64{decID},
+		Session:     openSession,
+	}
+	d := buyMarket(instr.UID, 1)
+	if err := s.Submit(context.Background(), []model.Decision{d}, sc); err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+	if err := s.Submit(context.Background(), []model.Decision{d}, sc); err != nil {
+		t.Fatalf("second submit (idempotent): %v", err)
+	}
+
+	rows := loadIntents(t, db)
+	if len(rows) != 1 {
+		t.Fatalf("got %d intents for one decision, want 1 (idempotent submit)", len(rows))
+	}
+	if rows[0].State != model.IntentAcked {
+		t.Errorf("intent state = %s, want acked", rows[0].State)
+	}
+}
+
+// TestRecover_ResolvesStuckIntents: a restart resolves intents stranded in
+// new/submitted to a terminal state and leaves resting acked intents alone.
+func TestRecover_ResolvesStuckIntents(t *testing.T) {
+	ctx := context.Background()
+	db := openDB(t)
+	clk := clock.NewSimulated(base)
+	s := newSim(t, db, clk, &fakeApplier{}, 0, "0")
+	instr := seedInstrument(t, db, "uid-1", 1, "0.01")
+
+	newID := insertIntentInState(t, db, instr.UID, model.IntentNew)
+	submittedID := insertIntentInState(t, db, instr.UID, model.IntentSubmitted)
+	ackedID := insertIntentInState(t, db, instr.UID, model.IntentAcked)
+
+	if err := s.Recover(ctx); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if got := stateOf(t, db, newID); got != model.IntentRejected {
+		t.Errorf("new intent after recover = %s, want rejected", got)
+	}
+	if got := stateOf(t, db, submittedID); got != model.IntentCanceled {
+		t.Errorf("submitted intent after recover = %s, want canceled", got)
+	}
+	if got := stateOf(t, db, ackedID); got != model.IntentAcked {
+		t.Errorf("acked intent after recover = %s, want acked (untouched)", got)
+	}
+
+	rec, err := (sqlite.IntentRepo{}).Get(ctx, db, newID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if rec.Reason == "" {
+		t.Error("recovered intent has no reason recorded on the row")
+	}
+
+	// Idempotent: a second Recover finds nothing to do.
+	if err := s.Recover(ctx); err != nil {
+		t.Fatalf("second recover: %v", err)
+	}
+	if got := stateOf(t, db, ackedID); got != model.IntentAcked {
+		t.Errorf("acked intent after second recover = %s, want acked", got)
+	}
+}
+
 // TestSubmit_HoldProducesNoIntent: a hold is not actionable.
 func TestSubmit_HoldProducesNoIntent(t *testing.T) {
 	db := openDB(t)
