@@ -31,6 +31,12 @@
 //  8. oversell — shrinks or strips sells so total pending sells never exceed
 //     the position (Phase 1 forbids shorting)
 //
+// An operational-halt gate runs right after the kill switch: when State.Halted
+// is set (a durable, operator-cleared state latched outside this package, e.g.
+// a fill settling the account below the cash floor), every new buy is stripped
+// while sells and closes still pass, so the robot stops adding risk but never
+// traps an existing position.
+//
 // A currency gate runs right after the allowlist (rule 2): any order on an
 // instrument whose currency differs from the configured base currency is
 // stripped before the notional/cash rules can price it, since all arithmetic

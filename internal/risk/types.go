@@ -70,6 +70,12 @@ func (p PendingIntents) buyLots() int64 {
 // It is a snapshot the caller assembles from the portfolio and the latest
 // market data; risk holds no state of its own between calls.
 type State struct {
+	// Halted reports that an operational halt is latched (e.g. a fill settled
+	// the account below the cash floor, DESIGN §8). While set, every new buy is
+	// stripped and only exits (sell/close) pass, until an operator clears the
+	// halt. The caller resolves it from the persisted halt state.
+	Halted bool
+
 	// BaseCurrency is the account's settlement currency (e.g. "rub"). Any
 	// action on an instrument quoted in a different currency is stripped: all
 	// of this package's notional/cash arithmetic is single-currency, so mixing
@@ -144,6 +150,7 @@ const (
 	RuleCashFloor           Rule = "cash_floor"
 	RuleOversell            Rule = "oversell"
 	RuleCurrencyMismatch    Rule = "currency_mismatch"
+	RuleOperationalHalt     Rule = "operational_halt"
 )
 
 // Adjustment is an audit record of one modification Check made to a

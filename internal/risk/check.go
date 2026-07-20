@@ -24,6 +24,7 @@ func Check(actions []model.Decision, state State, limits config.RiskConfig) Resu
 	maxDailyLoss := parseLimitOrZero(limits.MaxDailyLoss)
 	halted := applyKillSwitch(entries, state, maxDailyLoss, &adjustments)
 
+	applyOperationalHalt(entries, state, &adjustments)
 	applyAllowlist(entries, state, limits.Allowlist, &adjustments)
 	applyCurrencyMismatch(entries, state, &adjustments)
 	applyOrderCap(entries, limits.MaxOrdersPerCycle, RuleMaxOrdersPerCycle,
@@ -188,6 +189,24 @@ func applyAllowlist(entries []*entry, state State, allowlist []string, adjustmen
 			continue
 		}
 		strip(e, RuleAllowlist, "instrument not in configured allowlist", adjustments)
+	}
+}
+
+// applyOperationalHalt strips every new buy when an operational halt is
+// latched (state.Halted), leaving sells, closes and holds untouched: a halt
+// stops the robot opening or adding to positions but must never trap an
+// existing one, which stays exitable. The halt is a durable, operator-cleared
+// state set outside this package (e.g. a fill settling below the cash floor);
+// risk only reads it.
+func applyOperationalHalt(entries []*entry, state State, adjustments *[]Adjustment) {
+	if !state.Halted {
+		return
+	}
+	for _, e := range entries {
+		if !e.live || e.dec.Action != model.ActionBuy {
+			continue
+		}
+		strip(e, RuleOperationalHalt, "operational halt engaged: new buys blocked until cleared", adjustments)
 	}
 }
 

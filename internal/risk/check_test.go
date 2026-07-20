@@ -689,6 +689,32 @@ func TestCheck_OverflowingCandidateQuantityDoesNotBypassNotional(t *testing.T) {
 	}
 }
 
+// --- operational halt -------------------------------------------------------
+
+func TestOperationalHalt(t *testing.T) {
+	state := wideOpenState()
+	state.Halted = true
+	state.Positions[uidB] = Position{QtyLots: 100, LastPrice: model.MustDecimal("50")} // backs the sell exit
+
+	actions := []model.Decision{buy(uidA, 1), sell(uidB, 1), closeAction(uidB, 1), hold(uidC)}
+	res := Check(actions, state, wideOpenLimits())
+
+	if _, ok := allowedQty(t, res.Allowed, uidA); ok {
+		t.Errorf("buy must be stripped while halted")
+	}
+	adjs := adjustmentFor(res, 0)
+	if len(adjs) != 1 || adjs[0].Rule != RuleOperationalHalt {
+		t.Errorf("index 0 adjustments = %+v, want one strip tagged operational_halt", adjs)
+	}
+	// Exits and holds still pass — a halt must never trap an existing position.
+	if q, ok := allowedQty(t, res.Allowed, uidB); !ok || q != 1 {
+		t.Errorf("sell/close uidB should pass while halted (got ok=%v q=%d)", ok, q)
+	}
+	if len(res.Allowed) != 3 { // sell, close, hold
+		t.Errorf("Allowed = %+v, want the two exits and the hold", res.Allowed)
+	}
+}
+
 // --- currency gate ----------------------------------------------------------
 
 func TestCurrencyMismatch(t *testing.T) {
