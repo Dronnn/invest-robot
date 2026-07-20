@@ -383,7 +383,7 @@ func TestPositionNotional(t *testing.T) {
 		limits := wideOpenLimits()
 		limits.MaxPositionNotional = "1000"
 		state := wideOpenState()
-		state.OpenIntents[uidA] = PendingIntents{BuyLots: 5} // 500 pending @ last price 100
+		state.OpenIntents[uidA] = PendingIntents{Buys: []PendingBuy{{Lots: 5}}} // 500 pending @ last price 100
 		res := Check([]model.Decision{buy(uidA, 6)}, state, limits)
 
 		q, _ := allowedQty(t, res.Allowed, uidA)
@@ -749,7 +749,7 @@ func TestCashFloor_ReservesPendingBuys(t *testing.T) {
 		state := wideOpenState()
 		state.Cash = model.MustDecimal("1000")
 		// 5 lots of uidA already resting to buy @ 100 => 500 reserved, 500 free.
-		state.OpenIntents[uidA] = PendingIntents{BuyLots: 5}
+		state.OpenIntents[uidA] = PendingIntents{Buys: []PendingBuy{{Lots: 5}}}
 		res := Check([]model.Decision{buy(uidA, 8)}, state, limits) // wants 800
 
 		q, ok := allowedQty(t, res.Allowed, uidA)
@@ -767,11 +767,28 @@ func TestCashFloor_ReservesPendingBuys(t *testing.T) {
 		limits.CashFloor = "0"
 		state := wideOpenState()
 		state.Cash = model.MustDecimal("1000")
-		state.OpenIntents[uidA] = PendingIntents{BuyLots: 10} // 1000 reserved, nothing free
+		state.OpenIntents[uidA] = PendingIntents{Buys: []PendingBuy{{Lots: 10}}} // 1000 reserved, nothing free
 		res := Check([]model.Decision{buy(uidA, 1)}, state, limits)
 
 		if _, ok := allowedQty(t, res.Allowed, uidA); ok {
 			t.Fatalf("buy should be stripped: pending buys already reserve the whole budget")
+		}
+	})
+
+	t.Run("reserves a resting limit buy at its limit price, not the mark", func(t *testing.T) {
+		limits := wideOpenLimits()
+		limits.CashFloor = "0"
+		state := wideOpenState()
+		state.Cash = model.MustDecimal("1000")
+		// A 5-lot limit buy on uidA at 200 while uidA's mark is 100: it can
+		// consume 5*200 = 1000, reserving the whole budget. Pricing at the mark
+		// (500) would wrongly leave 500 free and let another buy through.
+		lp := model.MustDecimal("200")
+		state.OpenIntents[uidA] = PendingIntents{Buys: []PendingBuy{{Lots: 5, OrderType: model.OrderLimit, LimitPrice: lp}}}
+		res := Check([]model.Decision{buy(uidB, 1)}, state, limits) // uidB @ 50
+
+		if _, ok := allowedQty(t, res.Allowed, uidB); ok {
+			t.Fatalf("buy uidB should be stripped: the resting limit buy reserves the whole budget at its limit price")
 		}
 	})
 
@@ -780,8 +797,9 @@ func TestCashFloor_ReservesPendingBuys(t *testing.T) {
 		limits.CashFloor = "0"
 		state := wideOpenState()
 		state.Cash = model.MustDecimal("1000000")
-		// A pending buy on an instrument that cannot be priced (no mark, no quote).
-		state.OpenIntents[uidC] = PendingIntents{BuyLots: 5}
+		// A market pending buy on an instrument that cannot be priced (no mark,
+		// no quote), so its worst-case cost is unknown.
+		state.OpenIntents[uidC] = PendingIntents{Buys: []PendingBuy{{Lots: 5}}}
 		delete(state.Quotes, uidC)
 		res := Check([]model.Decision{buy(uidA, 1)}, state, limits)
 

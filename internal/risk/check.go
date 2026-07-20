@@ -347,8 +347,8 @@ func applyOversell(entries []*entry, state State, adjustments *[]Adjustment) {
 // non-zero quantity that cannot be priced.
 func existingExposure(uid model.InstrumentUID, lot int64, state State) (model.Decimal, bool) {
 	pos := state.Positions[uid]
-	pend := state.OpenIntents[uid]
-	if pos.QtyLots == 0 && pend.BuyLots == 0 {
+	pendBuyLots := state.OpenIntents[uid].buyLots()
+	if pos.QtyLots == 0 && pendBuyLots == 0 {
 		return model.Decimal{}, true
 	}
 	price, hasPrice := exposurePrice(uid, state)
@@ -367,8 +367,8 @@ func existingExposure(uid model.InstrumentUID, lot int64, state State) (model.De
 		}
 		total = v
 	}
-	if pend.BuyLots != 0 {
-		n, ok := notionalOf(pend.BuyLots, lot, price)
+	if pendBuyLots != 0 {
+		n, ok := notionalOf(pendBuyLots, lot, price)
 		if !ok {
 			return model.Decimal{}, false
 		}
@@ -434,7 +434,7 @@ func applyTotalExposure(entries []*entry, state State, maxTotalExposure model.De
 		sumLeg(uid, pos.QtyLots)
 	}
 	for uid, pend := range state.OpenIntents {
-		sumLeg(uid, pend.BuyLots)
+		sumLeg(uid, pend.buyLots())
 	}
 
 	budget, err := maxTotalExposure.Sub(baseline)
@@ -572,55 +572,71 @@ func applyCashFloor(entries []*entry, state State, cashFloor model.Decimal, adju
 }
 
 // reservedPendingBuyCost is the conservative cash the account has already
-// committed to resting buy intents across every instrument: for each pending
-// buy, its lots valued at the instrument's exposure price, padded with the
-// same market-slippage and fee buffers a fresh market buy is costed with (a
-// pending buy's order type is not carried in State, so the cushioned estimate
-// is used unconditionally — it can only over-reserve, never under-reserve).
-// ok is false if any pending buy cannot be valued, so the caller can force the
-// cash budget to zero rather than let an unpriceable commitment silently drop
-// out of the floor.
+// committed to resting buy intents across every instrument. Each pending buy is
+// priced at the most cash it can consume: a limit buy at its resting limit
+// price (the ceiling a limit fill can reach — the current mark would understate
+// it whenever the limit sits above the mark, letting a second buy pass and both
+// fills breach the floor), a market buy at the current mark padded for
+// slippage. A fee buffer is added in both cases. ok is false if any pending buy
+// cannot be valued, so the caller can force the cash budget to zero rather than
+// let an unpriceable commitment silently drop out of the floor.
 func reservedPendingBuyCost(state State) (model.Decimal, bool) {
 	total := model.Decimal{}
 	for uid, pend := range state.OpenIntents {
-		if pend.BuyLots <= 0 {
-			continue
-		}
 		instr, hasInstr := state.Instruments[uid]
-		if !hasInstr {
-			return model.Decimal{}, false
-		}
-		price, hasPrice := exposurePrice(uid, state)
-		if !hasPrice {
-			return model.Decimal{}, false
-		}
-		effectivePrice := price
-		if state.SlippageBufferBps != 0 {
-			p, err := price.MulBps(10000 + state.SlippageBufferBps)
+		for _, b := range pend.Buys {
+			if b.Lots <= 0 {
+				continue
+			}
+			if !hasInstr {
+				return model.Decimal{}, false
+			}
+			price, ok := pendingBuyPrice(uid, b, state)
+			if !ok {
+				return model.Decimal{}, false
+			}
+			n, ok := notionalOf(b.Lots, instr.Lot, price)
+			if !ok {
+				return model.Decimal{}, false
+			}
+			if state.FeeBufferBps != 0 {
+				fee, err := n.MulBps(state.FeeBufferBps)
+				if err != nil {
+					return model.Decimal{}, false
+				}
+				n, err = n.Add(fee)
+				if err != nil {
+					return model.Decimal{}, false
+				}
+			}
+			v, err := total.Add(n)
 			if err != nil {
 				return model.Decimal{}, false
 			}
-			effectivePrice = p
+			total = v
 		}
-		n, ok := notionalOf(pend.BuyLots, instr.Lot, effectivePrice)
-		if !ok {
-			return model.Decimal{}, false
-		}
-		if state.FeeBufferBps != 0 {
-			fee, err := n.MulBps(state.FeeBufferBps)
-			if err != nil {
-				return model.Decimal{}, false
-			}
-			n, err = n.Add(fee)
-			if err != nil {
-				return model.Decimal{}, false
-			}
-		}
-		v, err := total.Add(n)
+	}
+	return total, true
+}
+
+// pendingBuyPrice returns the per-share price a resting buy can consume cash up
+// to: a valid limit order's limit price, else the instrument's current mark
+// padded by the market-slippage buffer. ok is false when a market pending buy
+// has no mark to price against.
+func pendingBuyPrice(uid model.InstrumentUID, b PendingBuy, state State) (model.Decimal, bool) {
+	if b.OrderType == model.OrderLimit && b.LimitPrice.Sign() > 0 {
+		return b.LimitPrice, true
+	}
+	mark, ok := exposurePrice(uid, state)
+	if !ok {
+		return model.Decimal{}, false
+	}
+	if state.SlippageBufferBps != 0 {
+		p, err := mark.MulBps(10000 + state.SlippageBufferBps)
 		if err != nil {
 			return model.Decimal{}, false
 		}
-		total = v
+		return p, true
 	}
-	return total, true
+	return mark, true
 }

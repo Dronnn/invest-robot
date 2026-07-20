@@ -20,11 +20,26 @@ type Position struct {
 // one instrument, carried over from earlier cycles that haven't reached a
 // terminal state yet.
 //
-// BuyLots values exposure (rules 5-6) and reserves cash (rule 7): a pending
-// buy commits capital that hasn't landed yet, so counting it prevents the same
-// capital being committed twice across cycles before the first order fills. It
-// deliberately never nets *down* an exposure or cash limit — a pending buy
-// only ever adds commitment, never headroom.
+// PendingBuy is one resting buy intent carried into risk. Lots is its size; for
+// a limit order, LimitPrice is the resting limit it can fill up to (OrderType
+// is limit). A market pending buy leaves OrderType market (or unset) and
+// LimitPrice zero. The cash-floor reservation prices a limit pending buy at its
+// limit price — the most cash it can consume — and a market pending buy at the
+// current mark padded for slippage.
+type PendingBuy struct {
+	Lots       int64
+	OrderType  model.OrderType
+	LimitPrice model.Decimal
+}
+
+// PendingIntents is the risk view of resting order-intent lots for one
+// instrument, carried over from earlier cycles that haven't reached a terminal
+// state yet.
+//
+// Buys lists the resting buy intents. They commit capital that hasn't landed
+// yet: their lots value exposure (rules 5-6) at the current mark, and their
+// worst-case cost reserves cash (rule 7). A pending buy only ever adds
+// commitment, never headroom — it never nets *down* a limit.
 //
 // SellLots backs the oversell rule: lots already resting to sell are
 // subtracted from the position when sizing new sells, so total pending sells
@@ -34,8 +49,21 @@ type Position struct {
 // letting it widen a buy budget would lean on an order that might not fill,
 // which DESIGN.md §8 rules out.
 type PendingIntents struct {
-	BuyLots  int64
+	Buys     []PendingBuy
 	SellLots int64
+}
+
+// buyLots is the total resting buy quantity, used to value exposure at the
+// current mark (rules 5-6), independent of the individual limit prices the
+// cash-floor reservation cares about.
+func (p PendingIntents) buyLots() int64 {
+	var total int64
+	for _, b := range p.Buys {
+		if b.Lots > 0 {
+			total += b.Lots
+		}
+	}
+	return total
 }
 
 // State is everything Check needs to evaluate one cycle's proposed actions.
