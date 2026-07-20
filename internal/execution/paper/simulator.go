@@ -239,7 +239,7 @@ func (s *Simulator) ExpireDay(ctx context.Context, sessionEnd time.Time) error {
 			continue
 		}
 		err := sqlite.WithTx(ctx, s.db, func(ctx context.Context, tx *sql.Tx) error {
-			if err := s.journal.Transition(ctx, tx, in.ClientOrderID, model.IntentAcked, model.IntentCanceled); err != nil {
+			if err := s.journal.TransitionWithReason(ctx, tx, in.ClientOrderID, model.IntentAcked, model.IntentCanceled, "day order expired"); err != nil {
 				return err
 			}
 			return s.event(ctx, tx, "order_expired", map[string]string{
@@ -302,11 +302,13 @@ func (s *Simulator) reject(ctx context.Context, clientOrderID string, from model
 	})
 }
 
-// cancel moves a resting intent to canceled and records why. Used for
-// immediate-or-cancel orders that did not fill on their first observation.
+// cancel moves a resting intent to canceled and records why, persisting the
+// reason on the intent row (order_intents.reason) as well as in the events log.
+// Used for immediate-or-cancel orders that did not fill on their first genuine
+// observation.
 func (s *Simulator) cancel(ctx context.Context, clientOrderID string, reason string, now time.Time) error {
 	return sqlite.WithTx(ctx, s.db, func(ctx context.Context, tx *sql.Tx) error {
-		if err := s.journal.Transition(ctx, tx, clientOrderID, model.IntentAcked, model.IntentCanceled); err != nil {
+		if err := s.journal.TransitionWithReason(ctx, tx, clientOrderID, model.IntentAcked, model.IntentCanceled, reason); err != nil {
 			return err
 		}
 		return s.event(ctx, tx, "order_canceled", map[string]string{

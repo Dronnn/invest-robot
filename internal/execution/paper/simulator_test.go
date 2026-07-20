@@ -401,6 +401,13 @@ func TestExpireDay_CancelsRestingDayOrders(t *testing.T) {
 	if got := stateOf(t, db, idFilled); got != model.IntentFilled {
 		t.Errorf("filled order after expiry = %s, want filled (untouched)", got)
 	}
+	expired, err := (sqlite.IntentRepo{}).Get(ctx, db, idResting)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if expired.Reason != "day order expired" {
+		t.Errorf("expired order reason = %q, want %q persisted on the row", expired.Reason, "day order expired")
+	}
 }
 
 // TestOnQuote_IOCUnfilledCancels: an immediate-or-cancel order is canceled when
@@ -433,6 +440,13 @@ func TestOnQuote_IOCUnfilledCancels(t *testing.T) {
 	}
 	if got := stateOf(t, db, id); got != model.IntentCanceled {
 		t.Fatalf("IOC state after a non-crossing next observation = %s, want canceled", got)
+	}
+	in, err := (sqlite.IntentRepo{}).Get(ctx, db, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !strings.Contains(in.Reason, "ioc") {
+		t.Errorf("canceled IOC reason = %q, want the ioc-unfilled prose persisted on the row", in.Reason)
 	}
 }
 
