@@ -626,3 +626,35 @@ func formingCandle(uid string, ts time.Time, closePx string) tinvestcli.CandleEv
 		CandleTime:    ts,
 	}
 }
+
+func TestQuoteListenerFires(t *testing.T) {
+	b := newFakeBroker()
+	b.addInstrument("SBER@TQBR", uidSBER, "SBER")
+	_, s := tempStore(t)
+	c, err := market.New(deps(b, s, clock.Real()), market.Config{Universe: []string{"SBER@TQBR"}, Interval: model.Interval5m})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan model.Quote, 1)
+	c.RegisterQuoteListener(func(q model.Quote) {
+		select {
+		case got <- q:
+		default:
+		}
+	})
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+	h := <-b.handles
+
+	h.feed(tinvestcli.LastPriceEvent{InstrumentUID: uidSBER, Price: model.MustDecimal("270.8"), Time: time.Now().UTC()})
+	select {
+	case q := <-got:
+		if q.InstrumentUID != uidSBER || q.Last.String() != "270.8" {
+			t.Fatalf("listener got %+v, want SBER last 270.8", q)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("quote listener was not called after a persisted last-price quote")
+	}
+}
