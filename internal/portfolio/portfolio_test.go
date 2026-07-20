@@ -306,6 +306,7 @@ func TestApplyFill_InvalidFillRejected(t *testing.T) {
 		{"negative fee", FillApplication{Fill: model.Fill{IntentID: "x", Price: mustDecimal(t, "1"), Qty: 1, Fee: mustDecimal(t, "-1")}, InstrumentUID: uid, Side: model.SideBuy, Lot: 1}},
 		{"empty intent id", FillApplication{Fill: model.Fill{IntentID: "", Price: mustDecimal(t, "1"), Qty: 1}, InstrumentUID: uid, Side: model.SideBuy, Lot: 1}},
 		{"empty instrument uid", FillApplication{Fill: model.Fill{IntentID: "x", Price: mustDecimal(t, "1"), Qty: 1}, InstrumentUID: "", Side: model.SideBuy, Lot: 1}},
+		{"currency mismatch", FillApplication{Fill: model.Fill{IntentID: "x", Price: mustDecimal(t, "1"), Qty: 1}, InstrumentUID: uid, Side: model.SideBuy, Lot: 1, Currency: "USD"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -314,6 +315,23 @@ func TestApplyFill_InvalidFillRejected(t *testing.T) {
 				t.Errorf("err = %v, want *InvalidFillError", err)
 			}
 		})
+	}
+}
+
+func TestApplyFill_MatchingCurrencyPasses(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	uid := seedInstrument(t, db, "uid-cur", 1).UID
+	seedIntent(t, db, uid, "co-1")
+	p, _ := newTestPortfolio()
+
+	// testCurrency is "rub"; a fill tagged "RUB" (case-insensitive) must post
+	// cleanly.
+	if err := applyFillViaExecution(t, ctx, p, db, FillApplication{
+		Fill:          model.Fill{IntentID: "co-1", Price: mustDecimal(t, "100"), Qty: 1, TS: nowUTC()},
+		InstrumentUID: uid, Side: model.SideBuy, Lot: 1, Currency: "RUB",
+	}); err != nil {
+		t.Fatalf("matching currency fill should apply: %v", err)
 	}
 }
 

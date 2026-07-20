@@ -3,6 +3,7 @@ package portfolio
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/Dronnn/invest-robot/internal/clock"
 	"github.com/Dronnn/invest-robot/internal/model"
@@ -87,11 +88,19 @@ type FillApplication struct {
 	InstrumentUID model.InstrumentUID
 	Side          model.Side
 	Lot           int64
-	LowFidelity   bool
+	// Currency is the instrument's settlement currency. When set, it must
+	// match the portfolio's fixed currency; a mismatch is rejected rather than
+	// booked, so a fill in another currency can never post into the base-
+	// currency ledger. An empty Currency skips the check (the caller is
+	// asserting single-currency), keeping older call sites valid.
+	Currency    string
+	LowFidelity bool
 }
 
 // validate rejects a structurally invalid FillApplication before any I/O.
-func (fa FillApplication) validate() error {
+// currency is the portfolio's settlement currency, checked against
+// fa.Currency when the latter is set.
+func (fa FillApplication) validate(currency string) error {
 	switch {
 	case !fa.Side.Valid():
 		return &InvalidFillError{Reason: fmt.Sprintf("unknown side %q", fa.Side)}
@@ -107,6 +116,8 @@ func (fa FillApplication) validate() error {
 		return &InvalidFillError{Reason: "fill price must not be negative"}
 	case fa.Fill.Fee.Sign() < 0:
 		return &InvalidFillError{Reason: "fill fee must not be negative"}
+	case fa.Currency != "" && !strings.EqualFold(fa.Currency, currency):
+		return &InvalidFillError{Reason: fmt.Sprintf("fill currency %q does not match the account currency %q", fa.Currency, currency)}
 	default:
 		return nil
 	}
@@ -137,12 +148,16 @@ func (fa FillApplication) validate() error {
 // informational (already fully captured by the fill/fee rows above), not a
 // separate cash movement.
 //
+// A fill whose Currency is set and differs from the account currency is
+// rejected with *InvalidFillError and writes nothing — a fill settled in
+// another currency must never post into this single-currency ledger.
+//
 // Selling more lots than the position holds returns *OversellError and
 // writes nothing (Phase 1 forbids shorting). A position that fully closes
 // (resulting qty 0) is zeroed in place (qty=0, avg_price reset to zero), not
 // deleted — PositionRepo exposes no delete operation.
 func (p *Portfolio) ApplyFill(ctx context.Context, q sqlite.Querier, fa FillApplication) error {
-	if err := fa.validate(); err != nil {
+	if err := fa.validate(p.currency); err != nil {
 		return err
 	}
 
