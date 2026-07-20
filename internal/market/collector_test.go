@@ -448,6 +448,57 @@ func TestOrderbookQuoteIsHighFidelity(t *testing.T) {
 	}
 }
 
+// TestCompositeQuoteMergesLastAndBook proves a last-price update and an
+// order-book update each write a complete quote row, so neither clobbers the
+// other's fields: after a book update the last price survives, and after a
+// later last-price update the bid/ask survive.
+func TestCompositeQuoteMergesLastAndBook(t *testing.T) {
+	b := newFakeBroker()
+	b.addInstrument("SBER@TQBR", uidSBER, "SBER")
+	db, s := tempStore(t)
+	c, _ := market.New(deps(b, s, clock.Real()), market.Config{Universe: []string{"SBER@TQBR"}, Interval: model.Interval5m})
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+	h := <-b.handles
+	ctx := context.Background()
+
+	t1 := time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC)
+	h.feed(tinvestcli.LastPriceEvent{InstrumentUID: uidSBER, Price: model.MustDecimal("270.8"), Time: t1})
+	waitFor(t, "last-only quote", func() bool {
+		q, ok, _ := sqlite.QuoteRepo{}.Latest(ctx, db, uidSBER)
+		return ok && !q.Last.IsZero()
+	})
+
+	// A book update must keep the prior last price in the row.
+	t2 := t1.Add(time.Second)
+	h.feed(tinvestcli.OrderbookEvent{InstrumentUID: uidSBER, Bid: model.MustDecimal("270.4"), Ask: model.MustDecimal("270.6"), Time: t2})
+	waitFor(t, "composite quote with bid/ask", func() bool {
+		q, ok, _ := sqlite.QuoteRepo{}.Latest(ctx, db, uidSBER)
+		return ok && q.HasBidAsk()
+	})
+	q, _, _ := sqlite.QuoteRepo{}.Latest(ctx, db, uidSBER)
+	if q.Last.String() != "270.8" {
+		t.Fatalf("last = %s after the book update, want 270.8 preserved", q.Last)
+	}
+	if q.Bid.String() != "270.4" || q.Ask.String() != "270.6" {
+		t.Fatalf("bid/ask = %s/%s, want 270.4/270.6", q.Bid, q.Ask)
+	}
+
+	// A later last-price update must keep the bid/ask from the book.
+	t3 := t2.Add(time.Second)
+	h.feed(tinvestcli.LastPriceEvent{InstrumentUID: uidSBER, Price: model.MustDecimal("271.5"), Time: t3})
+	waitFor(t, "last updated to 271.5", func() bool {
+		q, ok, _ := sqlite.QuoteRepo{}.Latest(ctx, db, uidSBER)
+		return ok && q.Last.String() == "271.5"
+	})
+	q, _, _ = sqlite.QuoteRepo{}.Latest(ctx, db, uidSBER)
+	if !q.HasBidAsk() || q.Bid.String() != "270.4" || q.Ask.String() != "270.6" {
+		t.Fatalf("bid/ask = %s/%s after the last update, want them preserved", q.Bid, q.Ask)
+	}
+}
+
 func TestStreamDownAuthIsTerminal(t *testing.T) {
 	b := newFakeBroker()
 	b.addInstrument("SBER@TQBR", uidSBER, "SBER")

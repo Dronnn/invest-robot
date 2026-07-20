@@ -76,6 +76,7 @@ type Collector struct {
 	lastStreamEvent  time.Time
 	instHealth       map[model.InstrumentUID]*instHealth
 	forming          map[model.InstrumentUID]time.Time
+	quoteState       map[model.InstrumentUID]*quoteState
 }
 
 // resolved is one resolved universe entry.
@@ -122,6 +123,7 @@ func New(deps Deps, cfg Config) (*Collector, error) {
 		interval:    cfg.Interval,
 		instHealth:  map[model.InstrumentUID]*instHealth{},
 		forming:     map[model.InstrumentUID]time.Time{},
+		quoteState:  map[model.InstrumentUID]*quoteState{},
 	}, nil
 }
 
@@ -366,39 +368,90 @@ func (c *Collector) confirmBar(ctx context.Context, uid model.InstrumentUID, bar
 	}
 }
 
-// onLastPrice ingests a quote tick.
+// onLastPrice ingests a last-price tick, updating only the last field of the
+// instrument's composite quote and persisting a complete row.
 func (c *Collector) onLastPrice(ctx context.Context, e tinvestcli.LastPriceEvent) {
 	uid := model.InstrumentUID(e.InstrumentUID)
-	if err := c.quotes.InsertQuote(ctx, e.Quote()); err != nil {
+	obs := e.Time
+	if obs.IsZero() {
+		obs = c.clock.Now()
+	}
+	q := c.composeQuoteLast(uid, e.Price, obs)
+	if err := c.quotes.InsertQuote(ctx, q); err != nil {
 		c.logEvent(ctx, LevelWarn, "quote_insert_failed", fmt.Sprintf("%s: %v", uid, err))
 		c.markStale(uid)
 		return
 	}
 	c.mu.Lock()
 	if h := c.instHealth[uid]; h != nil {
-		h.lastQuote = e.Time
+		h.lastQuote = obs
 		h.stale = false
 	}
 	c.mu.Unlock()
 }
 
-// onOrderbook ingests a top-of-book snapshot as a high-fidelity quote (best bid
-// and ask). The paper executor prefers a quote with a real bid/ask and only
-// falls back to last price when they are absent, so surfacing these raises fill
-// fidelity. The stored quote carries its own fidelity signal (Quote.HasBidAsk).
+// onOrderbook ingests a top-of-book snapshot, updating only the bid/ask fields
+// of the instrument's composite quote and persisting a complete row. The paper
+// executor prefers a quote with a real bid/ask and only falls back to last
+// price when they are absent, so surfacing these raises fill fidelity; the
+// stored quote carries its own fidelity signal (Quote.HasBidAsk).
 func (c *Collector) onOrderbook(ctx context.Context, e tinvestcli.OrderbookEvent) {
 	uid := model.InstrumentUID(e.InstrumentUID)
-	if err := c.quotes.InsertQuote(ctx, e.Quote()); err != nil {
+	obs := e.Time
+	if obs.IsZero() {
+		obs = c.clock.Now()
+	}
+	q := c.composeQuoteBook(uid, e.Bid, e.Ask, obs)
+	if err := c.quotes.InsertQuote(ctx, q); err != nil {
 		c.logEvent(ctx, LevelWarn, "orderbook_insert_failed", fmt.Sprintf("%s: %v", uid, err))
 		c.markStale(uid)
 		return
 	}
 	c.mu.Lock()
 	if h := c.instHealth[uid]; h != nil {
-		h.lastQuote = e.Time
+		h.lastQuote = obs
 		h.stale = false
 	}
 	c.mu.Unlock()
+}
+
+// composeQuoteLast updates the instrument's last-known last price and returns a
+// complete quote carrying the last-known bid/ask alongside it, so a last-price
+// row never clobbers the top-of-book a prior order book established.
+func (c *Collector) composeQuoteLast(uid model.InstrumentUID, last model.Decimal, obs time.Time) model.Quote {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := c.quoteStateLocked(uid)
+	st.last = last
+	if obs.After(st.ts) {
+		st.ts = obs
+	}
+	return model.Quote{InstrumentUID: uid, Bid: st.bid, Ask: st.ask, Last: st.last, TS: st.ts}
+}
+
+// composeQuoteBook updates the instrument's last-known bid/ask and returns a
+// complete quote carrying the last-known last price alongside them.
+func (c *Collector) composeQuoteBook(uid model.InstrumentUID, bid, ask model.Decimal, obs time.Time) model.Quote {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := c.quoteStateLocked(uid)
+	st.bid = bid
+	st.ask = ask
+	if obs.After(st.ts) {
+		st.ts = obs
+	}
+	return model.Quote{InstrumentUID: uid, Bid: st.bid, Ask: st.ask, Last: st.last, TS: st.ts}
+}
+
+// quoteStateLocked returns (creating if needed) the mutable composite quote
+// state for uid. The caller must hold c.mu.
+func (c *Collector) quoteStateLocked(uid model.InstrumentUID) *quoteState {
+	st := c.quoteState[uid]
+	if st == nil {
+		st = &quoteState{}
+		c.quoteState[uid] = st
+	}
+	return st
 }
 
 // onStatus records lifecycle frames; an in-band (non-shutdown) disconnect is

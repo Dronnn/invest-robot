@@ -47,3 +47,15 @@ type instHealth struct {
 	lastQuote       time.Time
 	stale           bool
 }
+
+// quoteState is the collector's last-known composite top-of-book per instrument.
+// Last-price and order-book frames each carry only part of a quote (last, or
+// bid/ask), so the collector merges them here and persists complete rows rather
+// than letting one kind clobber the other's fields. ts is monotonic (the newest
+// observation), so the most recently written row always wins a Latest read.
+type quoteState struct {
+	bid  model.Decimal
+	ask  model.Decimal
+	last model.Decimal
+	ts   time.Time
+}
