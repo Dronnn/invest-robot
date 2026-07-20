@@ -98,8 +98,6 @@ type Engine struct {
 	paused      bool
 	nextCycleAt time.Time
 	last        Summary
-	ordersToday int
-	ordersDay   time.Time // the UTC date ordersToday counts
 }
 
 // New validates deps/cfg and returns an Engine.
@@ -279,28 +277,6 @@ func (e *Engine) setLast(s Summary) {
 	e.mu.Lock()
 	e.last = s
 	e.mu.Unlock()
-}
-
-// bumpOrdersToday adds n to today's order count, resetting at a UTC date change.
-func (e *Engine) bumpOrdersToday(now time.Time, n int) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	day := now.UTC().Truncate(24 * time.Hour)
-	if !day.Equal(e.ordersDay) {
-		e.ordersDay = day
-		e.ordersToday = 0
-	}
-	e.ordersToday += n
-}
-
-func (e *Engine) ordersTodayCount(now time.Time) int {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	day := now.UTC().Truncate(24 * time.Hour)
-	if !day.Equal(e.ordersDay) {
-		return 0
-	}
-	return e.ordersToday
 }
 
 // sessionWindow returns today's session window in absolute time, or the zero

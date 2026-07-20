@@ -85,7 +85,7 @@ func (e *Engine) RunOnce(ctx context.Context) (Summary, error) {
 	}
 
 	// --- risk-check ---
-	state := e.buildRiskState(ctx, req, asm, dayPnL, now)
+	state := e.buildRiskState(ctx, req, asm, dayPnL, sessionStart)
 	result := risk.Check(valid, state, e.cfg.Risk)
 	e.persistAdjustments(ctx, cycleID, result.Adjustments, now)
 	final := reconstructFinal(len(valid), result.Adjustments)
@@ -131,7 +131,6 @@ func (e *Engine) RunOnce(ctx context.Context) (Summary, error) {
 		if err := e.deps.Executor.Submit(ctx, orders, sc); err != nil {
 			return e.fail(ctx, cycleID, now, "execute", err)
 		}
-		e.bumpOrdersToday(now, len(orders))
 	}
 
 	// --- account ---
@@ -296,11 +295,18 @@ func (e *Engine) openIntentViews(ctx context.Context) []decision.IntentView {
 }
 
 // buildRiskState assembles the risk snapshot from the request, positions,
-// pending intents and quotes.
-func (e *Engine) buildRiskState(ctx context.Context, req decision.Request, asm assembled, dayPnL model.Decimal, now time.Time) risk.State {
+// pending intents and quotes. OrdersToday comes from the durable journal (every
+// order placed since the day baseline), so a restart cannot reset the per-day
+// order cap.
+func (e *Engine) buildRiskState(ctx context.Context, req decision.Request, asm assembled, dayPnL model.Decimal, sessionStart time.Time) risk.State {
 	halted := false
 	if h, err := (sqlite.HaltRepo{}).Status(ctx, e.deps.DB); err == nil {
 		halted = h.Engaged
+	}
+
+	ordersToday := 0
+	if n, err := (sqlite.IntentRepo{}).CountSince(ctx, e.deps.DB, sessionStart); err == nil {
+		ordersToday = n
 	}
 
 	positions := make(map[model.InstrumentUID]risk.Position)
@@ -338,7 +344,7 @@ func (e *Engine) buildRiskState(ctx context.Context, req decision.Request, asm a
 		BaseCurrency:      e.cfg.Currency,
 		Cash:              req.Portfolio.Cash,
 		DayPnL:            dayPnL,
-		OrdersToday:       e.ordersTodayCount(now),
+		OrdersToday:       ordersToday,
 		Positions:         positions,
 		OpenIntents:       pending,
 		Quotes:            asm.quotes,

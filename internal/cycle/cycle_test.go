@@ -3,6 +3,7 @@ package cycle_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -86,6 +87,7 @@ type rig struct {
 	eng       *cycle.Engine
 	sim       *paper.Simulator
 	collector *market.Collector
+	pf        *portfolio.Portfolio
 }
 
 func testRig(t *testing.T, clk *clock.Simulated) *rig {
@@ -130,7 +132,27 @@ func testRig(t *testing.T, clk *clock.Simulated) *rig {
 	if err != nil {
 		t.Fatalf("cycle: %v", err)
 	}
-	return &rig{db: db, clk: clk, eng: eng, sim: sim, collector: collector}
+	return &rig{db: db, clk: clk, eng: eng, sim: sim, collector: collector, pf: pf}
+}
+
+// newEngineWithRisk builds a fresh cycle engine on the rig's store/executor with
+// a custom risk config — used to model a process restart, which re-reads durable
+// state rather than in-memory counters.
+func (r *rig) newEngineWithRisk(t *testing.T, riskCfg config.RiskConfig) *cycle.Engine {
+	t.Helper()
+	eng, err := cycle.New(cycle.Deps{DB: r.db, Clock: r.clk, Engine: mustRules(t), Executor: r.sim, Portfolio: r.pf}, cycle.Config{
+		Mode:          "paper",
+		Interval:      model.Interval5m,
+		Currency:      "rub",
+		FeatureParams: features.Params{SMAPeriod: 2, EMAFastPeriod: 2, EMASlowPeriod: 3, RSIPeriod: 2, ATRPeriod: 2},
+		Risk:          riskCfg,
+		Paper:         config.PaperConfig{StartingCash: "100000", CommissionRate: "0"},
+		MaxDataAge:    time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+	return eng
 }
 
 func mustRules(t *testing.T) decision.Engine {
@@ -374,5 +396,46 @@ func TestCrashRecoveryCancelsStrandedSubmit(t *testing.T) {
 	}
 	if got.Reason == "" {
 		t.Fatal("canceled intent should carry a reason")
+	}
+}
+
+func TestOrdersTodayCapSurvivesRestart(t *testing.T) {
+	clk := clock.NewSimulated(baseTime)
+	r := testRig(t, clk)
+	r.backfillCandles(t) // persists the instrument and candles
+	r.seedQuote(t, "103", baseTime.Add(-time.Minute))
+	ctx := context.Background()
+
+	// Model an order already placed earlier today: a terminal (filled) intent
+	// created today still counts toward the per-day cap.
+	cid, _ := (sqlite.CycleRepo{}).Insert(ctx, r.db, sqlite.Cycle{StartedAt: clk.Now(), AsOf: clk.Now(), Mode: "paper", Engine: "rules", Status: "ok"})
+	did, _ := (sqlite.DecisionRepo{}).Insert(ctx, r.db, sqlite.DecisionRecord{
+		CycleID: cid, ValidationStatus: "allowed",
+		Decision: model.Decision{InstrumentUID: uidSBER, Action: model.ActionBuy, Quantity: 1, OrderType: model.OrderMarket, TimeInForce: model.TIFDay},
+	})
+	if err := (sqlite.IntentRepo{}).Insert(ctx, r.db, model.OrderIntent{
+		ClientOrderID: "22222222-2222-2222-2222-222222222222", DecisionID: did, InstrumentUID: uidSBER,
+		Side: model.SideBuy, Qty: 1, Type: model.OrderMarket, TimeInForce: model.TIFDay,
+		State: model.IntentFilled, CreatedAt: clk.Now(), UpdatedAt: clk.Now(),
+	}); err != nil {
+		t.Fatalf("seed prior intent: %v", err)
+	}
+
+	// A fresh engine (as after a restart) with a per-day cap of 1: the prior
+	// order already fills the day's budget read from the journal.
+	eng := r.newEngineWithRisk(t, config.RiskConfig{
+		MaxPositionNotional: "1000000", MaxTotalExposure: "1000000",
+		MaxOrdersPerCycle: 5, MaxOrdersPerDay: 1, MaxDailyLoss: "1000000", CashFloor: "0",
+	})
+	sum, err := eng.RunOnce(ctx)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if sum.Orders != 0 {
+		t.Fatalf("day cap should be exhausted by the prior order; got %d orders, want 0", sum.Orders)
+	}
+	decs, _ := (sqlite.DecisionRepo{}).ListByCycle(ctx, r.db, sum.ID)
+	if len(decs) != 1 || !strings.Contains(decs[0].ValidationStatus, "max_orders_per_day") {
+		t.Fatalf("buy should be stripped by the daily order cap, got %+v", decs)
 	}
 }
