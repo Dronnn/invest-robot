@@ -101,6 +101,47 @@ func TestDecide_NoEntryWhenAlreadyPositioned(t *testing.T) {
 	}
 }
 
+func TestDecide_EntersOnFreshCrossover(t *testing.T) {
+	req := baseRequest()
+	instr := instrumentFixture("SBER-UID", 251, 245, 60, 2.5, "250")
+	instr.Features.EMATrend = features.EMABullish
+	instr.PrevEMATrend = features.EMABearish // was bearish last cycle: a genuine cross up
+	req.Instruments = []decision.InstrumentContext{instr}
+
+	got := decideOne(t, req)
+	if got.Action != model.ActionBuy {
+		t.Fatalf("Action = %v, want buy on a fresh crossover (rationale=%q)", got.Action, got.Rationale)
+	}
+}
+
+func TestDecide_NoReentryWithoutFreshCross(t *testing.T) {
+	req := baseRequest()
+	instr := instrumentFixture("SBER-UID", 251, 245, 60, 2.5, "250")
+	instr.Features.EMATrend = features.EMABullish
+	instr.PrevEMATrend = features.EMABullish // already bullish last cycle: no new cross
+	req.Instruments = []decision.InstrumentContext{instr}
+
+	got := decideOne(t, req)
+	if got.Action != model.ActionHold {
+		t.Fatalf("Action = %v, want hold — a persisting bullish level is not a fresh cross (rationale=%q)", got.Action, got.Rationale)
+	}
+}
+
+func TestDecide_UnsetPrevTrendFallsBackToLevel(t *testing.T) {
+	// With no prior-trend lineage (first cycle after startup), a bullish level
+	// is still actionable so a genuine first signal is not lost.
+	req := baseRequest()
+	instr := instrumentFixture("SBER-UID", 251, 245, 60, 2.5, "250")
+	instr.Features.EMATrend = features.EMABullish
+	// PrevEMATrend left unset.
+	req.Instruments = []decision.InstrumentContext{instr}
+
+	got := decideOne(t, req)
+	if got.Action != model.ActionBuy {
+		t.Fatalf("Action = %v, want buy (unset prev trend degrades to the current level) rationale=%q", got.Action, got.Rationale)
+	}
+}
+
 func TestDecide_SuppressesEntryWhileIntentOpen(t *testing.T) {
 	req := baseRequest()
 	req.Instruments = []decision.InstrumentContext{

@@ -9,6 +9,7 @@ import (
 
 	"github.com/Dronnn/invest-robot/internal/clock"
 	"github.com/Dronnn/invest-robot/internal/decision"
+	"github.com/Dronnn/invest-robot/internal/features"
 	"github.com/Dronnn/invest-robot/internal/model"
 )
 
@@ -90,7 +91,7 @@ func (e *Engine) Decide(ctx context.Context, req decision.Request) (decision.Res
 		snap := instr.Features
 
 		switch {
-		case !hasPosition && snap.EMAFast > snap.EMASlow && snap.RSI > e.params.RSIEntryLow && snap.RSI < e.params.RSIEntryHigh:
+		case !hasPosition && crossedUp(instr) && snap.RSI > e.params.RSIEntryLow && snap.RSI < e.params.RSIEntryHigh:
 			dec, sized, err := e.buildEntry(req, instr)
 			if err != nil {
 				return decision.Response{}, decision.Meta{}, err
@@ -122,6 +123,38 @@ func (e *Engine) Decide(ctx context.Context, req decision.Request) (decision.Res
 		Raw:        raw,
 	}
 	return resp, meta, nil
+}
+
+// emaBullish reports whether the fast EMA is above the slow EMA on snap,
+// preferring the precomputed EMATrend classification (which applies a deadband
+// so a hair's-width crossing is not treated as a trend) and falling back to a
+// raw level comparison only when the trend is unset.
+func emaBullish(snap features.Snapshot) bool {
+	switch snap.EMATrend {
+	case features.EMABullish:
+		return true
+	case features.EMABearish, features.EMAFlat:
+		return false
+	default: // unset: fall back to the raw level
+		return snap.EMAFast > snap.EMASlow
+	}
+}
+
+// crossedUp reports a fresh bullish EMA crossover for instr: bullish now, and
+// not bullish on the previous cycle's snapshot. Requiring the transition — not
+// just the current level — stops the engine re-entering every bullish cycle
+// while a level persists (e.g. after a prior order was rejected or canceled and
+// no position resulted). When the previous trend is unset (no snapshot lineage
+// yet, such as the first cycle after startup), it degrades to the current
+// bullish reading so a genuine first signal is not silently dropped.
+func crossedUp(instr decision.InstrumentContext) bool {
+	if !emaBullish(instr.Features) {
+		return false
+	}
+	if instr.PrevEMATrend == "" {
+		return true
+	}
+	return instr.PrevEMATrend != features.EMABullish
 }
 
 // buildEntry sizes and constructs a market buy for instr. The second return

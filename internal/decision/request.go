@@ -99,6 +99,14 @@ type InstrumentContext struct {
 	Quote    QuoteView         `json:"quote"`
 	Features features.Snapshot `json:"features"`
 
+	// PrevEMATrend is the EMA trend classification from the previous cycle's
+	// feature snapshot for this instrument, carried from the snapshot lineage
+	// so a strategy can detect an actual EMA crossover (a transition into
+	// bullish/bearish) rather than re-firing every cycle a level holds. Empty
+	// when no prior snapshot exists yet (e.g. the first cycle after startup),
+	// in which case a crossover-based strategy degrades to the current level.
+	PrevEMATrend features.EMATrend `json:"prev_ema_trend,omitempty"`
+
 	// DataFreshness is how old the newest data behind Quote/Features is,
 	// relative to Request.AsOf. Tagged _ns because time.Duration's default
 	// JSON encoding is already its int64 nanosecond count.
