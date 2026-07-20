@@ -19,7 +19,9 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 fake="$work/faketinvest"
+robot="$work/robot"
 go build -o "$fake" ./test/faketinvest
+go build -o "$robot" ./cmd/robot
 
 scenario="$root/test/faketinvest/scenarios/happy"
 config="$work/robot.toml"
@@ -41,6 +43,14 @@ timezone = "UTC"
 [engine]
 active = "rules"
 
+[risk]
+max_position_notional = "50000"
+max_total_exposure = "150000"
+max_orders_per_cycle = 5
+max_orders_per_day = 20
+max_daily_loss = "5000"
+cash_floor = "10000"
+
 [storage]
 db_path = "$work/robot.db"
 
@@ -55,4 +65,4 @@ export FAKETINVEST_STATE="$work/state"
 mkdir -p "$FAKETINVEST_STATE"
 
 echo "dev-fake-run: robot --headless --config $config"
-exec go run ./cmd/robot --headless --config "$config"
+exec "$robot" --headless --config "$config"
