@@ -190,6 +190,20 @@ func (IntentRepo) NonTerminal(ctx context.Context, q Querier) ([]model.OrderInte
 	return out, nil
 }
 
+// CountSince returns the number of order intents created at or after since,
+// regardless of their current state. This is what the per-day order cap counts
+// — every order placed in the window, filled or not (DESIGN §6) — and reading it
+// from the durable journal means bouncing the process cannot reset the cap.
+func (IntentRepo) CountSince(ctx context.Context, q Querier, since time.Time) (int, error) {
+	var n int
+	err := q.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM order_intents WHERE created_at >= ?`, timeText(since)).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: count order intents since %s: %w", since, err)
+	}
+	return n, nil
+}
+
 func scanIntent(s rowScanner) (model.OrderIntent, error) {
 	var in model.OrderIntent
 	var uid, side, typ, tif, state, createdAt, updatedAt string
