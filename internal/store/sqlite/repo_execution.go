@@ -106,3 +106,52 @@ func (TradingStatusRepo) Get(ctx context.Context, q Querier, uid model.Instrumen
 	}
 	return TradingStatus{InstrumentUID: uid, Status: status, BuyAvailable: buy != 0, SellAvailable: sell != 0}, true, nil
 }
+
+// Halt is the persisted operational-halt state.
+type Halt struct {
+	Engaged   bool
+	Reason    string
+	EngagedAt time.Time
+}
+
+// HaltRepo persists the operational-halt latch. While engaged, risk blocks all
+// new buys until an operator clears it (DESIGN §8).
+type HaltRepo struct{}
+
+// Engage latches the halt with reason at the given time. It is idempotent and
+// first-writer-wins: a halt already engaged keeps its original reason and
+// timestamp, so the cause of the first breach is preserved.
+func (HaltRepo) Engage(ctx context.Context, q Querier, reason string, at time.Time) error {
+	_, err := q.ExecContext(ctx,
+		`INSERT INTO operational_halt (id, reason, engaged_at) VALUES (1, ?, ?) ON CONFLICT(id) DO NOTHING`,
+		reason, timeText(at))
+	if err != nil {
+		return fmt.Errorf("sqlite: engage operational halt: %w", err)
+	}
+	return nil
+}
+
+// Clear releases the halt (operator intervention). A no-op when not engaged.
+func (HaltRepo) Clear(ctx context.Context, q Querier) error {
+	if _, err := q.ExecContext(ctx, `DELETE FROM operational_halt WHERE id = 1`); err != nil {
+		return fmt.Errorf("sqlite: clear operational halt: %w", err)
+	}
+	return nil
+}
+
+// Status returns the current halt state.
+func (HaltRepo) Status(ctx context.Context, q Querier) (Halt, error) {
+	row := q.QueryRowContext(ctx, `SELECT reason, engaged_at FROM operational_halt WHERE id = 1`)
+	var reason, at string
+	if err := row.Scan(&reason, &at); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Halt{}, nil
+		}
+		return Halt{}, fmt.Errorf("sqlite: get operational halt: %w", err)
+	}
+	t, err := parseTimeText(at)
+	if err != nil {
+		return Halt{}, fmt.Errorf("sqlite: get operational halt: %w", err)
+	}
+	return Halt{Engaged: true, Reason: reason, EngagedAt: t}, nil
+}

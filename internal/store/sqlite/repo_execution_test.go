@@ -41,6 +41,39 @@ func TestExecSessionRepo_UpsertAndGet(t *testing.T) {
 	}
 }
 
+func TestHaltRepo_EngageClearStatus(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+
+	if h, err := (HaltRepo{}).Status(ctx, db); err != nil || h.Engaged {
+		t.Fatalf("initial status = (%+v, %v), want not engaged", h, err)
+	}
+
+	at := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	if err := (HaltRepo{}).Engage(ctx, db, "cash below floor", at); err != nil {
+		t.Fatalf("engage: %v", err)
+	}
+	h, err := (HaltRepo{}).Status(ctx, db)
+	if err != nil || !h.Engaged || h.Reason != "cash below floor" || !h.EngagedAt.Equal(at) {
+		t.Fatalf("status = (%+v, %v), want engaged with reason and timestamp", h, err)
+	}
+
+	// First-writer-wins: a second engage keeps the original reason.
+	if err := (HaltRepo{}).Engage(ctx, db, "some other reason", at.Add(time.Hour)); err != nil {
+		t.Fatalf("second engage: %v", err)
+	}
+	if h, _ := (HaltRepo{}).Status(ctx, db); h.Reason != "cash below floor" {
+		t.Errorf("reason after second engage = %q, want the original preserved", h.Reason)
+	}
+
+	if err := (HaltRepo{}).Clear(ctx, db); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if h, err := (HaltRepo{}).Status(ctx, db); err != nil || h.Engaged {
+		t.Fatalf("status after clear = (%+v, %v), want not engaged", h, err)
+	}
+}
+
 func TestTradingStatusRepo_UpsertAndGet(t *testing.T) {
 	db := openTest(t)
 	ctx := context.Background()
